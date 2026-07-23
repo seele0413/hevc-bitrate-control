@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hevc-interframe-lab"
+version = "0.11.0"
+description = "面向固定监控场景的 H.265 默认编码与三档综合策略研究工具"
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.100",
+  "uvicorn>=0.20",
+  "python-multipart>=0.0.9",
+]
+
+[tool.setuptools.packages.find]
+include = ["hevc_lab*"]

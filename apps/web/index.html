@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>H.265 四路编码本地验证台</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">Local HEVC Lab</p>
+          <h1>四路编码对比</h1>
+        </div>
+        <p class="boundary">
+          H.264 预览仅用于浏览器观看；正式指标以 H.265 输出文件为准。
+        </p>
+      </section>
+
+      <section class="uploader" aria-label="创建编码任务">
+        <label class="file-picker">
+          <span id="fileName">选择 MP4 / MKV 视频</span>
+          <input id="videoFile" type="file" accept=".mp4,.mkv,video/mp4,video/x-matroska" />
+        </label>
+        <button id="createJob" type="button">开始编码</button>
+      </section>
+
+      <section class="status-panel" aria-live="polite">
+        <div class="status-copy">
+          <span id="statusBadge" class="status-badge">等待上传</span>
+          <span id="statusText">选择一个本地视频后创建任务。</span>
+        </div>
+        <div class="progress-track">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <p id="errorText" class="error-text" hidden></p>
+      </section>
+
+      <section id="resultsPanel" class="results-panel" hidden>
+        <div id="modeTabs" class="mode-tabs" role="tablist" aria-label="选择上层对比策略"></div>
+
+        <div class="compare-layout">
+          <div class="compare-stage" id="compareStage">
+            <video id="baseVideo" class="compare-video base-video" playsinline preload="metadata"></video>
+            <div id="topLayer" class="top-layer">
+              <video id="overlayVideo" class="compare-video overlay-video" playsinline preload="metadata" muted></video>
+            </div>
+            <div id="divider" class="divider">
+              <span id="savingBadge" class="saving-badge">--</span>
+            </div>
+            <input id="splitSlider" class="split-slider" type="range" min="0" max="100" value="50" aria-label="拖动对比滑块" />
+            <div class="video-label left-label">
+              <strong>默认</strong>
+              <span>x265 原生默认</span>
+            </div>
+            <div class="video-label right-label">
+              <strong id="selectedLabel">均衡</strong>
+              <span id="selectedSubLabel">综合策略</span>
+            </div>
+          </div>
+
+          <div class="control-row">
+            <button id="playToggle" type="button">播放</button>
+            <input id="seekSlider" class="seek-slider" type="range" min="0" max="1000" value="0" aria-label="视频进度" />
+            <span id="timeText" class="time-text">00:00 / 00:00</span>
+            <label class="compact-select">
+              倍速
+              <select id="speedSelect">
+                <option value="0.5">0.5x</option>
+                <option value="1" selected>1x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2x</option>
+              </select>
+            </label>
+            <label class="compact-select">
+              声音
+              <select id="audioSelect">
+                <option value="default" selected>默认</option>
+                <option value="selected">上层</option>
+                <option value="none">静音</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div id="metricGrid" class="metric-grid"></div>
+        <div id="downloadGrid" class="download-grid"></div>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
