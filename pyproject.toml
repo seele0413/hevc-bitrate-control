@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hevc-interframe-lab"
-version = "0.11.0"
+version = "1.0.0"
 description = "面向固定监控场景的 H.265 默认编码与三档综合策略研究工具"
 requires-python = ">=3.9"
 dependencies = [

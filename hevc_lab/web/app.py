@@ -36,7 +36,7 @@ def create_app(manager: Optional[JobManager] = None) -> FastAPI:
 
     app = FastAPI(
         title="H.265 四路编码本地验证台",
-        version="0.11.0",
+        version="1.0.0",
         lifespan=lifespan,
     )
 
