@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>H.265 编码策略对比 · V1.4</title>
+<style>
+  :root {
+    --blue: #1B6DFF;
+    --text: #1A1D26;
+    --gray: #8A8F99;
+    --card: #FFFFFF;
+    --page: #F5F6F8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--page);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    width: 100%;
+    max-width: 1080px;
+    background: var(--card);
+    border-radius: 16px;
+    box-shadow: 0 8px 30px rgba(20, 30, 60, 0.08);
+    padding: 32px;
+  }
+  header { text-align: center; margin-bottom: 28px; }
+  h1 { font-size: 24px; font-weight: 700; letter-spacing: 0.5px; }
+  .subtitle { color: var(--gray); font-size: 13px; margin-top: 8px; }
+
+  /* 策略切换：等宽双 Tab，参考微帧风格 */
+  .strategy-tabs {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .strategy-tab {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 16px 20px;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+    background: #f6f7f9;
+    color: var(--text);
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: all .2s ease;
+  }
+  .strategy-tab:hover {
+    border-color: var(--blue);
+    color: var(--blue);
+    background: #fff;
+  }
+  .strategy-tab.active {
+    background: var(--blue);
+    color: #fff;
+    border-color: var(--blue);
+    box-shadow: 0 4px 14px rgba(27, 109, 255, 0.25);
+  }
+  .strategy-tab .tab-title {
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.2;
+  }
+  .strategy-tab .tab-desc {
+    font-size: 12px;
+    opacity: .85;
+    font-weight: 500;
+    line-height: 1.55;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .3px;
+    word-break: normal;
+    overflow-wrap: anywhere;
+  }
+
+  /* 对比查看器 */
+  .viewer { display: block; }
+  .viewer[hidden] { display: none; }
+  .stage {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #111;
+    user-select: none;
+    --p: 50; /* 分割线位置百分比，JS 同步更新，驱动蓝色角标跟随 */
+  }
+  .media {
+    position: absolute;
+    inset: 0;
+  }
+  .media.base {
+    background: linear-gradient(135deg, #2b2f36 0%, #3a3f47 100%);
+  }
+  .media.ours {
+    background: linear-gradient(135deg, #1c3a52 0%, #2f5570 100%);
+    clip-path: inset(0 0 0 50%);
+  }
+  video.media {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  /* 角标：黑标固定画布左上；蓝标跟分割线，可覆盖黑标、可出画布 */
+  .label {
+    position: absolute;
+    top: 0;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    line-height: 1.5;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    font-variant-numeric: tabular-nums;
+    z-index: 3;
+    max-width: 280px;
+    pointer-events: none;
+  }
+  .label.base {
+    left: 0;
+    background: rgba(20, 24, 32, 0.55);
+    color: #fff;
+  }
+  .label.ours {
+    /* 左缘直接贴在分割线上，无 gap；可覆盖左侧黑标，可滑出画布右边缘 */
+    left: calc(var(--p, 50) * 1%);
+    background: rgba(27, 109, 255, 0.55);
+    color: #fff;
+    text-align: left;
+  }
+  .label .name { font-size: 16px; font-weight: 700; }
+  .label .hl { font-weight: 700; color: #ffd76a; }
+  .label.ours .hl { color: #cfe4ff; }
+
+  /* 分割线 + 徽标（徽标放在分割线内部，随分割线一起移动、可被拖拽、可出画布） */
+  .divider {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 2px;
+    background: #fff;
+    transform: translateX(-1px);
+    cursor: ew-resize;
+    outline: none;
+    z-index: 1;
+  }
+  .divider:focus-visible { box-shadow: 0 0 0 2px var(--blue); }
+  .badge {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 88px;
+    height: 88px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.18);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    text-align: center;
+  }
+  .badge .small { font-size: 11px; opacity: .9; }
+  .badge .big { font-size: 22px; font-weight: 800; color: #6ea8ff; }
+
+  /* 播放控制条（沿用页面同一设计语言） */
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 16px;
+    padding: 10px 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fff;
+  }
+  .ctrl-btn {
+    flex: none;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    border: none;
+    background: var(--blue);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background .2s;
+  }
+  .ctrl-btn:hover { background: #1558d6; }
+  .ctrl-btn svg { width: 18px; height: 18px; }
+  .ctrl-btn .icon-pause { display: none; }
+  .controls.playing .icon-play { display: none; }
+  .controls.playing .icon-pause { display: block; }
+  .progress {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: #dcdfe6;
+    outline: none;
+    cursor: pointer;
+  }
+  .progress::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid var(--blue);
+    box-shadow: 0 1px 4px rgba(0,0,0,.2);
+  }
+  .progress::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid var(--blue);
+    box-shadow: 0 1px 4px rgba(0,0,0,.2);
+  }
+  .time {
+    flex: none;
+    font-size: 12px;
+    color: #4a4f57;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .rate {
+    flex: none;
+    border: 1px solid #dcdfe6;
+    background: #fff;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: #4a4f57;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  /* 指标说明 */
+  .metrics {
+    margin-top: 16px;
+    text-align: center;
+    color: var(--gray);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.5px;
+  }
+  /* 底部：下载按钮，居右 */
+  .footer-row {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .download-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    border: 1px solid #dcdfe6;
+    background: #fff;
+    color: var(--gray);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    text-decoration: none;
+    transition: color .2s, border-color .2s;
+  }
+  .download-btn:hover { color: var(--blue); border-color: var(--blue); }
+  .download-btn svg { width: 20px; height: 20px; }
+
+  /* 专用 Tab 占位 */
+  .placeholder-box {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border: 2px dashed #C5C8CE;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--gray);
+    text-align: center;
+    gap: 10px;
+  }
+  .placeholder-box .icon { color: #C5C8CE; }
+  .placeholder-box .title { font-size: 18px; font-weight: 600; color: #6b7280; }
+  .placeholder-box .desc { font-size: 13px; max-width: 420px; line-height: 1.6; }
+
+  @media (max-width: 768px) {
+    .card { padding: 20px; }
+    h1 { font-size: 20px; }
+    .strategy-tab { padding: 14px 16px; }
+    .strategy-tab .tab-title { font-size: 18px; }
+    .strategy-tab .tab-desc { font-size: 11px; }
+    .badge { width: 64px; height: 64px; }
+    .badge .big { font-size: 16px; }
+    .controls { flex-wrap: wrap; }
+    .time { order: 3; width: 100%; text-align: center; }
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <header>
+    <h1 id="pageTitle">H.265 编码策略对比 · V1.4</h1>
+    <p class="subtitle" id="pageSubtitle">数据加载中…</p>
+  </header>
+
+  <!-- 策略切换：等宽双 Tab -->
+  <div class="strategy-tabs" role="tablist">
+    <button class="strategy-tab active" id="tabGeneric" data-target="generic" role="tab" aria-selected="true">
+      <span class="tab-title" id="tabGenericTitle">通用</span>
+      <span class="tab-desc" id="tabGenericDesc"></span>
+    </button>
+    <button class="strategy-tab" id="tabSpecialized" data-target="specialized" role="tab" aria-selected="false">
+      <span class="tab-title" id="tabSpecTitle">专用</span>
+      <span class="tab-desc" id="tabSpecDesc"></span>
+    </button>
+  </div>
+
+  <!-- 通用 Tab 内容 -->
+  <section class="viewer" id="viewer-generic">
+    <div class="stage" id="stage">
+      <video class="media base" id="videoBase" preload="auto" playsinline loop></video>
+      <video class="media ours" id="ours" preload="auto" playsinline loop muted></video>
+      <div class="label base">
+        <div class="name" id="baseName">默认方案</div>
+        <div>Resolution: <span id="baseRes">—</span></div>
+        <div>Bitrate: <span class="hl" id="baseBitrate">—</span></div>
+        <div>CRF: <span id="baseCrf">—</span></div>
+      </div>
+      <div class="label ours">
+        <div class="name" id="oursName">保守方案</div>
+        <div>Resolution: <span id="oursRes">—</span></div>
+        <div>Bitrate: <span class="hl" id="oursBitrate">—</span></div>
+        <div>CRF: <span id="oursCrf">—</span></div>
+      </div>
+      <div class="divider" id="divider" tabindex="0" role="slider" aria-valuenow="50" aria-valuemin="0" aria-valuemax="100">
+        <div class="badge">
+          <span class="small">码率节省</span>
+          <span class="big" id="savingBig">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 播放控制条 -->
+    <div class="controls" id="controls">
+      <button class="ctrl-btn" id="playBtn" aria-label="播放 / 暂停">
+        <svg class="icon-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"></path></svg>
+        <svg class="icon-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"></path></svg>
+      </button>
+      <input type="range" class="progress" id="progress" min="0" max="1000" value="0" aria-label="播放进度"/>
+      <div class="time" id="timeLabel">0:00 / 0:00</div>
+      <select class="rate" id="rateSelect" aria-label="播放倍速">
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1.0x</option>
+        <option value="1.5">1.5x</option>
+        <option value="2">2.0x</option>
+      </select>
+    </div>
+
+    <div class="metrics" id="metricsLine"></div>
+    <div class="footer-row">
+      <a class="download-btn" id="dlBase" download title="下载默认方案 H.265 文件" aria-label="下载默认方案 H.265 文件">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12"></path><path d="M7 11l5 5 5-5"></path><path d="M5 21h14"></path>
+        </svg>
+      </a>
+      <a class="download-btn" id="dlOurs" download title="下载保守方案 H.265 文件" aria-label="下载保守方案 H.265 文件">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12"></path><path d="M7 11l5 5 5-5"></path><path d="M5 21h14"></path>
+        </svg>
+      </a>
+      <a class="download-btn" id="dlCsv" download title="下载指标 CSV" aria-label="下载指标 CSV">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12"></path><path d="M7 11l5 5 5-5"></path><path d="M5 21h14"></path>
+        </svg>
+      </a>
+    </div>
+  </section>
+
+  <!-- 专用 Tab 内容（占位：不接视频、不接指标、不接下载） -->
+  <section class="viewer" id="viewer-specialized" hidden>
+    <div class="placeholder-box">
+      <svg class="icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+        <circle cx="12" cy="13" r="4"></circle>
+      </svg>
+      <div class="title" id="specPlaceholderTitle">专用方案对比待补充</div>
+      <div class="desc" id="specPlaceholderDesc"></div>
+    </div>
+  </section>
+</div>
+
+<script>
+(async function () {
+  // ===== 数据加载（不写死，全部来自 data/results.json） =====
+  let DATA;
+  try {
+    const resp = await fetch('data/results.json', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    DATA = await resp.json();
+  } catch (err) {
+    const sub = document.getElementById('pageSubtitle');
+    sub.textContent = '数据加载失败：请通过 HTTP 服务访问本页（如在 apps/demo 目录运行 python -m http.server），file:// 直接打开无法读取 data/results.json';
+    sub.style.color = '#d43f3a';
+    return;
+  }
+
+  const { page, baseline, ours, specialized, metricsDownload } = DATA;
+
+  // ===== 格式化 =====
+  const fmtMbps = v => v.toFixed(3) + ' Mbit/s';
+  const fmtCrf = v => (v === null || v === undefined) ? '—' : Number(v).toFixed(1);
+  const fmtSaving = v => Number(v).toFixed(2) + '%';
+  const paramsTwoLines = s => {
+    const parts = s.split(' · ');
+    const mid = Math.ceil(parts.length / 2);
+    return parts.slice(0, mid).join(' · ') + '<br>' + parts.slice(mid).join(' · ');
+  };
+
+  // ===== 填充头部与 Tab =====
+  document.getElementById('pageTitle').textContent = page.title;
+  document.title = page.title;
+  document.getElementById('pageSubtitle').textContent = page.subtitle;
+  document.getElementById('tabGenericTitle').textContent = ours.tabTitle;
+  document.getElementById('tabGenericDesc').innerHTML = paramsTwoLines(ours.params);
+  document.getElementById('tabSpecTitle').textContent = specialized.tabTitle;
+  document.getElementById('tabSpecDesc').textContent = specialized.title;
+
+  // ===== 填充角标与徽标 =====
+  document.getElementById('baseName').textContent = baseline.displayName;
+  document.getElementById('baseRes').textContent = baseline.resolution;
+  document.getElementById('baseBitrate').textContent = fmtMbps(baseline.bitrateMbps);
+  document.getElementById('baseCrf').textContent = fmtCrf(baseline.crf);
+  document.getElementById('oursName').textContent = ours.displayName;
+  document.getElementById('oursRes').textContent = ours.resolution;
+  document.getElementById('oursBitrate').textContent = fmtMbps(ours.bitrateMbps);
+  document.getElementById('oursCrf').textContent = fmtCrf(ours.crf);
+  document.getElementById('savingBig').textContent = fmtSaving(ours.savingVsDefaultPct);
+  document.getElementById('metricsLine').textContent =
+    `VMAF ${ours.vmaf.toFixed(3)} · P5 ${ours.vmafP5.toFixed(3)} · SSIM ${ours.ssim.toFixed(4)} · 编码速度 ${ours.encodeSpeedX}x`;
+
+  // ===== 填充占位区与下载 =====
+  document.getElementById('specPlaceholderTitle').textContent = specialized.title;
+  document.getElementById('specPlaceholderDesc').textContent = specialized.description;
+  document.getElementById('dlBase').href = baseline.hevcDownload;
+  document.getElementById('dlOurs').href = ours.hevcDownload;
+  document.getElementById('dlCsv').href = metricsDownload;
+
+  // ===== 视频源 =====
+  const videoBase = document.getElementById('videoBase');
+  const oursVideo = document.getElementById('ours');
+  videoBase.src = baseline.previewSrc;
+  oursVideo.src = ours.previewSrc;
+
+  // ===== 通用 / 专用 切换 =====
+  const tabs = document.querySelectorAll('.strategy-tab');
+  const vGeneric = document.getElementById('viewer-generic');
+  const vSpec = document.getElementById('viewer-specialized');
+  function show(which) {
+    const isGeneric = which === 'generic';
+    vGeneric.hidden = !isGeneric;
+    vSpec.hidden = isGeneric;
+    tabs.forEach(tab => {
+      const active = tab.dataset.target === which;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+    });
+    if (!isGeneric) pause(); // 切到占位 Tab 时暂停播放
+  }
+  tabs.forEach(tab => tab.addEventListener('click', () => show(tab.dataset.target)));
+
+  // ===== 分割线拖拽（蓝色角标跟随分割线移动，不翻转） =====
+  const stage = document.getElementById('stage');
+  const divider = document.getElementById('divider');
+
+  function setPos(pct) {
+    pct = Math.max(0, Math.min(100, pct));
+    oursVideo.style.clipPath = `inset(0 0 0 ${pct}%)`;
+    divider.style.left = pct + '%';
+    stage.style.setProperty('--p', pct);
+    divider.setAttribute('aria-valuenow', Math.round(pct));
+  }
+
+  let dragging = false;
+  function posFromEvent(clientX) {
+    const r = stage.getBoundingClientRect();
+    return ((clientX - r.left) / r.width) * 100;
+  }
+  divider.addEventListener('mousedown', e => { dragging = true; e.preventDefault(); });
+  window.addEventListener('mousemove', e => { if (dragging) setPos(posFromEvent(e.clientX)); });
+  window.addEventListener('mouseup', () => { dragging = false; });
+  divider.addEventListener('touchstart', e => { dragging = true; }, { passive: true });
+  divider.addEventListener('touchmove', e => { if (dragging) setPos(posFromEvent(e.touches[0].clientX)); }, { passive: true });
+  window.addEventListener('touchend', () => { dragging = false; });
+  divider.addEventListener('keydown', e => {
+    const parsed = parseFloat(divider.style.left);
+    const cur = Number.isFinite(parsed) ? parsed : 50;
+    if (e.key === 'ArrowLeft') { setPos(cur - 2); e.preventDefault(); }
+    if (e.key === 'ArrowRight') { setPos(cur + 2); e.preventDefault(); }
+  });
+
+  // ===== 双视频同步（base 为主时钟，ours 静音跟随，只保留一路声音） =====
+  const controls = document.getElementById('controls');
+  const playBtn = document.getElementById('playBtn');
+  const progress = document.getElementById('progress');
+  const timeLabel = document.getElementById('timeLabel');
+  const rateSelect = document.getElementById('rateSelect');
+
+  function fmtTime(t) {
+    if (!Number.isFinite(t)) return '0:00';
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    return m + ':' + String(s).padStart(2, '0');
+  }
+
+  function play() {
+    oursVideo.play().catch(() => {});
+    videoBase.play().catch(() => {});
+    controls.classList.add('playing');
+  }
+  function pause() {
+    videoBase.pause();
+    oursVideo.pause();
+    controls.classList.remove('playing');
+  }
+  playBtn.addEventListener('click', () => { videoBase.paused ? play() : pause(); });
+
+  // 进度同步：偏差 > 0.15s 时校正 ours
+  videoBase.addEventListener('timeupdate', () => {
+    if (Math.abs(oursVideo.currentTime - videoBase.currentTime) > 0.15) {
+      oursVideo.currentTime = videoBase.currentTime;
+    }
+    if (videoBase.duration) {
+      const ratio = videoBase.currentTime / videoBase.duration;
+      progress.value = Math.round(ratio * 1000);
+      const pct = (ratio * 100).toFixed(1);
+      progress.style.background =
+        `linear-gradient(to right, var(--blue) 0%, var(--blue) ${pct}%, #dcdfe6 ${pct}%, #dcdfe6 100%)`;
+      timeLabel.textContent = fmtTime(videoBase.currentTime) + ' / ' + fmtTime(videoBase.duration);
+    }
+  });
+
+  // seek 同步
+  progress.addEventListener('input', () => {
+    if (videoBase.duration) {
+      const t = (progress.value / 1000) * videoBase.duration;
+      videoBase.currentTime = t;
+      oursVideo.currentTime = t;
+    }
+  });
+
+  // 倍速同步
+  rateSelect.addEventListener('change', () => {
+    const r = parseFloat(rateSelect.value);
+    videoBase.playbackRate = r;
+    oursVideo.playbackRate = r;
+  });
+
+  videoBase.addEventListener('loadedmetadata', () => {
+    timeLabel.textContent = fmtTime(videoBase.currentTime) + ' / ' + fmtTime(videoBase.duration);
+  });
+  // 循环回绕时两路对齐
+  videoBase.addEventListener('ended', () => { oursVideo.currentTime = videoBase.currentTime; });
+
+  // 初始 Tab：可通过 URL ?tab=specialized 指定
+  const initTab = new URLSearchParams(location.search).get('tab');
+  if (initTab === 'generic' || initTab === 'specialized') show(initTab);
+
+  // 初始分割线位置：默认 50%，可通过 URL ?p=15 等参数覆盖
+  const initP = parseFloat(new URLSearchParams(location.search).get('p'));
+  setPos(Number.isFinite(initP) ? initP : 50);
+})();
+</script>
+</body>
+</html>

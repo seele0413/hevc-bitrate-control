@@ -1,0 +1,39 @@
+{
+  "page": {
+    "title": "H.265 编码策略对比 · V1.4",
+    "subtitle": "x265 原生默认 vs 通用无 ROI 方案 · 60 秒真实监控素材"
+  },
+  "baseline": {
+    "id": "default_x265",
+    "displayName": "默认方案",
+    "description": "x265 原生默认参数",
+    "resolution": "1920×1080",
+    "bitrateMbps": 0.770573,
+    "crf": null,
+    "previewSrc": "videos/previews/default_x265_preview.mp4",
+    "hevcDownload": "videos/hevc/default_x265.mp4"
+  },
+  "ours": {
+    "id": "composite_conservative",
+    "displayName": "保守方案",
+    "tabTitle": "通用",
+    "params": "CRF 36.0 · preset medium · GOP 10s · ref 6 · b-frames 8 · lookahead 90 · 无roi · 无降噪",
+    "resolution": "1920×1080",
+    "bitrateMbps": 0.298020,
+    "crf": 36.0,
+    "vmaf": 85.019,
+    "vmafP5": 81.445,
+    "ssim": 0.977667,
+    "encodeSpeedX": 1.711,
+    "savingVsDefaultPct": 61.32,
+    "previewSrc": "videos/previews/composite_conservative_preview.mp4",
+    "hevcDownload": "videos/hevc/composite_conservative.mp4"
+  },
+  "specialized": {
+    "tabTitle": "专用",
+    "placeholder": true,
+    "title": "专用方案对比待补充",
+    "description": "本 Tab 预留，后续将接入专用场景下的 ROI / 降噪方案对比结果。"
+  },
+  "metricsDownload": "data/final_metrics.csv"
+}
