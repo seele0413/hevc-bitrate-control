@@ -10,8 +10,8 @@
     "resolution": "1920×1080",
     "bitrateMbps": 0.770573,
     "crf": null,
-    "previewSrc": "videos/previews/default_x265_preview.mp4",
-    "hevcDownload": "videos/hevc/default_x265.mp4"
+    "previewSrc": "videos/default_preview.mp4",
+    "hevcDownload": "videos/default_x265.mp4"
   },
   "ours": {
     "id": "composite_conservative",
@@ -26,8 +26,8 @@
     "ssim": 0.977667,
     "encodeSpeedX": 1.711,
     "savingVsDefaultPct": 61.32,
-    "previewSrc": "videos/previews/composite_conservative_preview.mp4",
-    "hevcDownload": "videos/hevc/composite_conservative.mp4"
+    "previewSrc": "videos/conservative_preview.mp4",
+    "hevcDownload": "videos/conservative_hevc.mp4"
   },
   "specialized": {
     "tabTitle": "专用",

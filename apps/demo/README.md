@@ -7,15 +7,19 @@
 ```text
 apps/demo/
 ├─ index.html
+├─ styles.css
+├─ app.js
 ├─ data/
 │  ├─ results.json
 │  └─ final_metrics.csv
 └─ videos/
-   ├─ previews/   # H.264 浏览器预览
-   └─ hevc/       # H.265/HEVC 正式下载文件
+   ├─ default_preview.mp4
+   ├─ conservative_preview.mp4
+   ├─ default_x265.mp4
+   └─ conservative_hevc.mp4
 ```
 
-`data/results.json` 是页面主要数据源。当前展示“监控素材二”的两路离线结果：x265 原生默认和通用无 ROI / 保守方案。H.264 预览应从对应的 H.265/HEVC 正式结果转码生成，不要把原始输入视频混作某一路编码预览。
+`data/results.json` 是页面主要数据源。当前展示“监控素材二”的两路离线结果：x265 原生默认和通用无 ROI / 保守方案。H.264 预览采用 `videos/*_preview.mp4` 的扁平路径；H.265/HEVC 正式文件同样放在 `videos/` 下作为下载资源。不要把原始输入视频混作某一路编码预览。
 
 ## Cloudflare Pages 设置
 
