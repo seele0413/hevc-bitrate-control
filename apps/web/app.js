@@ -1,4 +1,24 @@
-const elements = {
+const els = {
+  tabs: document.querySelectorAll(".strategy-tab"),
+  viewerGeneric: document.querySelector("#viewerGeneric"),
+  viewerSpecialized: document.querySelector("#viewerSpecialized"),
+  liveStage: document.querySelector("#liveStage"),
+  liveVideo: document.querySelector("#liveVideo"),
+  liveEmpty: document.querySelector("#liveEmpty"),
+  rtspForm: document.querySelector("#rtspForm"),
+  rtspUrl: document.querySelector("#rtspUrl"),
+  startStream: document.querySelector("#startStream"),
+  stopStream: document.querySelector("#stopStream"),
+  sourceText: document.querySelector("#sourceText"),
+  hlsText: document.querySelector("#hlsText"),
+  statusName: document.querySelector("#statusName"),
+  streamText: document.querySelector("#streamText"),
+  stateText: document.querySelector("#stateText"),
+  liveStatusBadge: document.querySelector("#liveStatusBadge"),
+  maskedUrlText: document.querySelector("#maskedUrlText"),
+  logText: document.querySelector("#logText"),
+  liveErrorText: document.querySelector("#liveErrorText"),
+  runtimeError: document.querySelector("#runtimeError"),
   fileInput: document.querySelector("#videoFile"),
   fileName: document.querySelector("#fileName"),
   createJob: document.querySelector("#createJob"),
@@ -7,86 +27,265 @@ const elements = {
   progressFill: document.querySelector("#progressFill"),
   errorText: document.querySelector("#errorText"),
   resultsPanel: document.querySelector("#resultsPanel"),
-  modeTabs: document.querySelector("#modeTabs"),
-  compareStage: document.querySelector("#compareStage"),
-  splitSlider: document.querySelector("#splitSlider"),
-  topLayer: document.querySelector("#topLayer"),
-  divider: document.querySelector("#divider"),
-  savingBadge: document.querySelector("#savingBadge"),
-  selectedLabel: document.querySelector("#selectedLabel"),
-  selectedSubLabel: document.querySelector("#selectedSubLabel"),
-  baseVideo: document.querySelector("#baseVideo"),
-  overlayVideo: document.querySelector("#overlayVideo"),
-  playToggle: document.querySelector("#playToggle"),
-  seekSlider: document.querySelector("#seekSlider"),
-  timeText: document.querySelector("#timeText"),
-  speedSelect: document.querySelector("#speedSelect"),
-  audioSelect: document.querySelector("#audioSelect"),
   metricGrid: document.querySelector("#metricGrid"),
   downloadGrid: document.querySelector("#downloadGrid"),
 };
+
+const expectedPipelineVersion = "v1.4.0";
+const expectedStrategyIds = [
+  "default_x265",
+  "generic_no_roi",
+  "budget_neutral_roi",
+  "roi_denoise_experimental",
+];
 
 const statusTitles = {
   queued: "排队中",
   preparing_reference: "准备参考画面",
   encoding_default: "编码默认方案",
-  searching_conservative: "搜索保守综合策略",
-  validating_conservative: "验证保守综合策略",
-  searching_balanced: "搜索均衡综合策略",
-  validating_balanced: "验证均衡综合策略",
-  searching_aggressive: "搜索激进综合策略",
-  validating_aggressive: "验证激进综合策略",
-  generating_previews: "生成浏览器 H.264 预览",
+  searching_general: "搜索通用无 ROI 方案",
+  validating_general: "验证通用无 ROI 方案",
+  searching_roi: "搜索预算中性 ROI",
+  validating_roi: "验证 ROI 预算和重点区域",
+  searching_roi_denoise: "搜索 ROI + 降噪实验项",
+  validating_roi_denoise: "验证降噪预算和重点区域",
+  generating_previews: "生成浏览器预览",
   completed: "已完成",
   failed: "失败",
 };
 
-const modeMeta = {
-  composite_conservative: {
-    title: "保守",
-    mode: "conservative",
-    quality: "QUALITY 95",
-    detail: "WZ265保守综合策略",
-  },
-  composite_balanced: {
-    title: "均衡",
-    mode: "balanced",
-    quality: "QUALITY 90",
-    detail: "WZ265均衡综合策略",
-  },
-  composite_aggressive: {
-    title: "激进",
-    mode: "aggressive",
-    quality: "QUALITY 83",
-    detail: "WZ265激进综合策略",
-  },
+const liveStatusTitles = {
+  starting: "启动中",
+  running: "预览中",
+  failed: "失败",
+  stopped: "已停止",
 };
 
+let runtimeReady = false;
+let liveStreamId = null;
+let livePollTimer = null;
+let liveHls = null;
 let pollTimer = null;
 let activeResult = null;
-let activeStrategyId = "composite_balanced";
-let userSeeking = false;
+
+function showTab(which) {
+  const generic = which === "generic";
+  els.viewerGeneric.hidden = !generic;
+  els.viewerSpecialized.hidden = generic;
+  els.tabs.forEach((tab) => {
+    const active = tab.dataset.target === which;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+}
+
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `请求失败：${response.status}`);
+  }
+  return data;
+}
+
+function runtimeLooksCurrent(runtime) {
+  if (!runtime || runtime.pipeline_version !== expectedPipelineVersion) return false;
+  const ids = new Set(runtime.strategy_ids || []);
+  return expectedStrategyIds.every((id) => ids.has(id));
+}
+
+async function checkRuntime() {
+  try {
+    const runtime = await fetchJson("/api/runtime");
+    if (!runtimeLooksCurrent(runtime)) {
+      els.createJob.disabled = true;
+      els.runtimeError.hidden = false;
+      els.runtimeError.textContent =
+        `后端仍是 ${runtime.pipeline_version || "旧版"}，请关闭当前服务后重新运行 start_web.cmd。`;
+      return false;
+    }
+    if (!runtime.live_preview || runtime.live_preview.enabled !== true) {
+      els.runtimeError.hidden = false;
+      els.runtimeError.textContent = "当前后端未启用实时预览接口。";
+      return false;
+    }
+    runtimeReady = true;
+    els.createJob.disabled = false;
+    els.runtimeError.hidden = true;
+    els.runtimeError.textContent = "";
+    return true;
+  } catch (error) {
+    els.createJob.disabled = true;
+    els.runtimeError.hidden = false;
+    els.runtimeError.textContent = "后端服务还没启动或没有重启，请运行 start_web.cmd。";
+    return false;
+  }
+}
+
+function setLiveStatus(payload = {}) {
+  const status = payload.status || "idle";
+  const title = liveStatusTitles[status] || "未启动";
+  const streamLabel = payload.stream_id ? payload.stream_id.slice(0, 8) : "--";
+  const maskedUrl = payload.masked_url || "--";
+  const playlistReady = Boolean(payload.playlist_url);
+  const lastLog = payload.log_tail && payload.log_tail.length
+    ? payload.log_tail[payload.log_tail.length - 1]
+    : "--";
+
+  els.statusName.textContent = title;
+  els.liveStatusBadge.textContent = title;
+  els.streamText.textContent = streamLabel;
+  els.stateText.textContent = status;
+  els.sourceText.textContent = maskedUrl;
+  els.maskedUrlText.textContent = maskedUrl;
+  els.hlsText.textContent = playlistReady ? "已生成" : "未生成";
+  els.logText.textContent = lastLog;
+
+  if (payload.error) {
+    els.liveErrorText.hidden = false;
+    els.liveErrorText.textContent = payload.error;
+  } else {
+    els.liveErrorText.hidden = true;
+    els.liveErrorText.textContent = "";
+  }
+
+  els.stopStream.disabled = !payload.stream_id || status === "stopped" || status === "failed";
+}
+
+function clearLivePlayer() {
+  if (liveHls) {
+    liveHls.destroy();
+    liveHls = null;
+  }
+  delete els.liveVideo.dataset.playlist;
+  els.liveVideo.pause();
+  els.liveVideo.removeAttribute("src");
+  els.liveVideo.load();
+  els.liveEmpty.classList.remove("hide");
+  els.hlsText.textContent = "未生成";
+}
+
+function attachLivePlayer(playlistUrl) {
+  if (!playlistUrl || els.liveVideo.dataset.playlist === playlistUrl) return;
+  clearLivePlayer();
+  els.liveEmpty.classList.add("hide");
+  els.liveVideo.dataset.playlist = playlistUrl;
+  if (window.Hls && window.Hls.isSupported()) {
+    liveHls = new window.Hls({
+      liveSyncDurationCount: 3,
+      maxLiveSyncPlaybackRate: 1.5,
+    });
+    liveHls.loadSource(playlistUrl);
+    liveHls.attachMedia(els.liveVideo);
+    liveHls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      els.liveVideo.play().catch(() => {});
+    });
+  } else if (els.liveVideo.canPlayType("application/vnd.apple.mpegurl")) {
+    els.liveVideo.src = playlistUrl;
+    els.liveVideo.play().catch(() => {});
+  } else {
+    els.liveErrorText.hidden = false;
+    els.liveErrorText.textContent = "当前浏览器缺少 HLS 播放能力，请确认 hls.js 已加载。";
+  }
+}
+
+async function pollLiveStream() {
+  if (!liveStreamId) return;
+  try {
+    const payload = await fetchJson(`/api/streams/${liveStreamId}`);
+    setLiveStatus(payload);
+    if (payload.playlist_url && payload.status === "running") {
+      attachLivePlayer(payload.playlist_url);
+    }
+    if (payload.status === "failed" || payload.status === "stopped") {
+      if (livePollTimer) clearInterval(livePollTimer);
+      livePollTimer = null;
+      if (payload.status === "stopped") clearLivePlayer();
+    }
+  } catch (error) {
+    els.liveErrorText.hidden = false;
+    els.liveErrorText.textContent = error.message;
+    if (livePollTimer) clearInterval(livePollTimer);
+    livePollTimer = null;
+  }
+}
+
+async function startLiveStream() {
+  if (!runtimeReady && !(await checkRuntime())) return;
+  const rtspUrl = els.rtspUrl.value.trim();
+  if (!rtspUrl) {
+    els.liveErrorText.hidden = false;
+    els.liveErrorText.textContent = "请先输入 RTSP 地址。";
+    return;
+  }
+
+  els.startStream.disabled = true;
+  clearLivePlayer();
+  setLiveStatus({ status: "starting" });
+  try {
+    const payload = await fetchJson("/api/streams", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rtsp_url: rtspUrl }),
+    });
+    liveStreamId = payload.stream_id;
+    setLiveStatus(payload);
+    if (livePollTimer) clearInterval(livePollTimer);
+    livePollTimer = setInterval(pollLiveStream, 1000);
+    await pollLiveStream();
+  } catch (error) {
+    liveStreamId = null;
+    setLiveStatus();
+    els.liveErrorText.hidden = false;
+    els.liveErrorText.textContent = error.message;
+  } finally {
+    els.startStream.disabled = false;
+  }
+}
+
+async function stopLiveStream() {
+  if (!liveStreamId) return;
+  els.stopStream.disabled = true;
+  try {
+    const payload = await fetchJson(`/api/streams/${liveStreamId}`, {
+      method: "DELETE",
+    });
+    setLiveStatus(payload);
+    if (livePollTimer) clearInterval(livePollTimer);
+    livePollTimer = null;
+    clearLivePlayer();
+  } catch (error) {
+    els.liveErrorText.hidden = false;
+    els.liveErrorText.textContent = error.message;
+  }
+}
 
 function setStatus(job) {
   const title = job.stage_title || statusTitles[job.status] || job.status;
-  elements.statusBadge.textContent = title;
-  elements.statusText.textContent = job.job_id
+  els.statusBadge.textContent = title;
+  els.statusText.textContent = job.job_id
     ? `任务 ${job.job_id.slice(0, 8)} 正在处理。`
     : "选择一个本地视频后创建任务。";
-  elements.progressFill.style.width = `${job.progress || 0}%`;
+  els.progressFill.style.width = `${job.progress || 0}%`;
   if (job.status === "failed" && job.error) {
-    elements.errorText.hidden = false;
-    elements.errorText.textContent = job.error;
+    els.errorText.hidden = false;
+    els.errorText.textContent = job.error;
   } else {
-    elements.errorText.hidden = true;
-    elements.errorText.textContent = "";
+    els.errorText.hidden = true;
+    els.errorText.textContent = "";
   }
 }
 
 function setPlainStatus(text) {
-  elements.statusBadge.textContent = "提示";
-  elements.statusText.textContent = text;
-  elements.progressFill.style.width = "0%";
+  els.statusBadge.textContent = "提示";
+  els.statusText.textContent = text;
+  els.progressFill.style.width = "0%";
+}
+
+function resultLooksCurrent(result) {
+  if (!result || result.pipeline_version !== expectedPipelineVersion) return false;
+  const ids = new Set((result.strategies || []).map((strategy) => strategy.strategy_id));
+  return expectedStrategyIds.every((id) => ids.has(id));
 }
 
 function formatBitrate(value) {
@@ -102,108 +301,39 @@ function formatSaving(value) {
   return "0.00% 持平";
 }
 
+function formatNumber(value, digits = 3, suffix = "") {
+  if (value === null || value === undefined) return "--";
+  return `${value.toFixed(digits)}${suffix}`;
+}
+
 function savingClass(value) {
   if (value > 0) return "saving-positive";
   if (value < 0) return "saving-negative";
   return "";
 }
 
-function byId(id) {
-  return activeResult.strategies.find((strategy) => strategy.strategy_id === id);
-}
-
-function setSplit(value) {
-  const percent = `${value}%`;
-  elements.compareStage.style.setProperty("--split", percent);
-}
-
-function renderModeTabs() {
-  elements.modeTabs.innerHTML = "";
-  Object.entries(modeMeta).forEach(([strategyId, meta]) => {
-    const strategy = byId(strategyId);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `mode-tab${strategyId === activeStrategyId ? " active" : ""}`;
-    button.disabled = !strategy || strategy.status !== "completed";
-    button.setAttribute("role", "tab");
-    button.setAttribute("aria-selected", strategyId === activeStrategyId ? "true" : "false");
-    button.innerHTML = `
-      <span class="mode-kicker">${meta.quality}</span>
-      <span class="mode-title">${meta.title}</span>
-      <span class="mode-detail">${meta.detail}</span>
-    `;
-    button.addEventListener("click", () => {
-      activeStrategyId = strategyId;
-      renderResult();
-    });
-    elements.modeTabs.appendChild(button);
-  });
-}
-
-function setVideoSources(defaultStrategy, selectedStrategy) {
-  const baseSrc = defaultStrategy.preview_url || "";
-  const overlaySrc = selectedStrategy.preview_url || "";
-  if (elements.baseVideo.dataset.src !== baseSrc) {
-    elements.baseVideo.src = baseSrc;
-    elements.baseVideo.dataset.src = baseSrc;
-  }
-  if (elements.overlayVideo.dataset.src !== overlaySrc) {
-    elements.overlayVideo.src = overlaySrc;
-    elements.overlayVideo.dataset.src = overlaySrc;
-  }
-  elements.baseVideo.muted = elements.audioSelect.value !== "default";
-  elements.overlayVideo.muted = elements.audioSelect.value !== "selected";
-  applyPlaybackRate();
-}
-
-function renderCompare() {
-  const defaultStrategy = byId("default_x265");
-  let selectedStrategy = byId(activeStrategyId);
-  if (!selectedStrategy || selectedStrategy.status !== "completed") {
-    selectedStrategy = activeResult.strategies.find(
-      (item) => item.strategy_id !== "default_x265" && item.status === "completed",
-    );
-    activeStrategyId = selectedStrategy ? selectedStrategy.strategy_id : activeStrategyId;
-  }
-  if (!defaultStrategy || !selectedStrategy) return;
-  const meta = modeMeta[selectedStrategy.strategy_id] || {
-    title: selectedStrategy.title,
-    detail: "综合策略",
-  };
-  elements.selectedLabel.textContent = meta.title;
-  elements.selectedSubLabel.textContent = selectedStrategy.title || meta.detail;
-  elements.savingBadge.textContent =
-    selectedStrategy.saving_vs_default_pct === null ||
-    selectedStrategy.saving_vs_default_pct === undefined
-      ? "--"
-      : `${selectedStrategy.saving_vs_default_pct.toFixed(2)}%`;
-  elements.savingBadge.className = `saving-badge ${savingClass(
-    selectedStrategy.saving_vs_default_pct,
-  )}`;
-  setVideoSources(defaultStrategy, selectedStrategy);
-}
-
 function renderMetrics() {
-  elements.metricGrid.innerHTML = "";
+  els.metricGrid.innerHTML = "";
   activeResult.strategies.forEach((strategy) => {
     const card = document.createElement("article");
     card.className = "metric-card";
-    const saving = strategy.saving_vs_default_pct;
     card.innerHTML = `
       <h3>${strategy.title}</h3>
       <div class="metric-list">
         <div>状态：<span>${strategy.status === "completed" ? "已生成" : "失败"}</span></div>
         <div>分辨率：<span>${strategy.resolution || "--"}</span></div>
-        <div>平均视频包码率：<span>${formatBitrate(strategy.average_video_packet_bitrate_bps)}</span></div>
-        <div>相对默认：<span class="${savingClass(saving)}">${formatSaving(saving)}</span></div>
+        <div>码率：<span>${formatBitrate(strategy.average_video_packet_bitrate_bps)}</span></div>
+        <div>CRF：<span>${formatNumber(strategy.selected_crf, 1)}</span></div>
+        <div>VMAF / P5：<span>${formatNumber(strategy.vmaf_mean)} / ${formatNumber(strategy.vmaf_p5)}</span></div>
+        <div>相对默认：<span class="${savingClass(strategy.saving_vs_default_pct)}">${formatSaving(strategy.saving_vs_default_pct)}</span></div>
       </div>
     `;
-    elements.metricGrid.appendChild(card);
+    els.metricGrid.appendChild(card);
   });
 }
 
 function renderDownloads() {
-  elements.downloadGrid.innerHTML = "";
+  els.downloadGrid.innerHTML = "";
   activeResult.strategies.forEach((strategy) => {
     const card = document.createElement("article");
     card.className = "download-card";
@@ -212,26 +342,15 @@ function renderDownloads() {
       <h3>${strategy.title}</h3>
       <a href="${href}" ${href ? "" : 'aria-disabled="true"'}>${href ? "下载 H.265 输出" : "未生成文件"}</a>
     `;
-    elements.downloadGrid.appendChild(card);
+    els.downloadGrid.appendChild(card);
   });
 }
 
 function renderResult() {
   if (!activeResult) return;
-  elements.resultsPanel.hidden = false;
-  renderModeTabs();
-  renderCompare();
+  els.resultsPanel.hidden = false;
   renderMetrics();
   renderDownloads();
-}
-
-async function fetchJson(url, options) {
-  const response = await fetch(url, options);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.detail || `请求失败：${response.status}`);
-  }
-  return data;
 }
 
 async function pollJob(jobId) {
@@ -242,8 +361,14 @@ async function pollJob(jobId) {
       clearInterval(pollTimer);
       pollTimer = null;
       activeResult = await fetchJson(`/api/jobs/${jobId}/results`);
+      if (!resultLooksCurrent(activeResult)) {
+        localStorage.removeItem("hevc_lab_last_job");
+        activeResult = null;
+        els.resultsPanel.hidden = true;
+        setPlainStatus("检测到上一次任务是旧版结果，已清除；请重新创建 V1.4 任务。");
+        return;
+      }
       renderResult();
-      return;
     }
     if (job.status === "failed") {
       clearInterval(pollTimer);
@@ -257,13 +382,14 @@ async function pollJob(jobId) {
 }
 
 async function createJob() {
-  const file = elements.fileInput.files[0];
+  if (!runtimeReady && !(await checkRuntime())) return;
+  const file = els.fileInput.files[0];
   if (!file) {
     setPlainStatus("请先选择一个 MP4 或 MKV 视频。");
     return;
   }
-  elements.createJob.disabled = true;
-  elements.resultsPanel.hidden = true;
+  els.createJob.disabled = true;
+  els.resultsPanel.hidden = true;
   activeResult = null;
   try {
     const body = new FormData();
@@ -280,119 +406,30 @@ async function createJob() {
   } catch (error) {
     setPlainStatus(error.message);
   } finally {
-    elements.createJob.disabled = false;
+    els.createJob.disabled = false;
   }
 }
 
-function formatTime(seconds) {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "00:00";
-  const whole = Math.floor(seconds);
-  const minutes = Math.floor(whole / 60)
-    .toString()
-    .padStart(2, "0");
-  const rest = (whole % 60).toString().padStart(2, "0");
-  return `${minutes}:${rest}`;
-}
+els.tabs.forEach((tab) => tab.addEventListener("click", () => showTab(tab.dataset.target)));
+els.rtspForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  startLiveStream();
+});
+els.stopStream.addEventListener("click", stopLiveStream);
+els.fileInput.addEventListener("change", () => {
+  const file = els.fileInput.files[0];
+  els.fileName.textContent = file ? file.name : "选择 MP4 / MKV 视频";
+});
+els.createJob.addEventListener("click", createJob);
 
-function mediaDuration() {
-  return Math.max(elements.baseVideo.duration || 0, elements.overlayVideo.duration || 0);
-}
-
-function alignVideos(force = false) {
-  const master = elements.baseVideo;
-  const slave = elements.overlayVideo;
-  if (!master.src || !slave.src || !Number.isFinite(master.currentTime)) return;
-  const drift = Math.abs((slave.currentTime || 0) - master.currentTime);
-  if (force || drift > 0.12) {
-    slave.currentTime = master.currentTime;
+async function initApp() {
+  setLiveStatus();
+  const ready = await checkRuntime();
+  if (!ready) return;
+  const lastJobId = localStorage.getItem("hevc_lab_last_job");
+  if (lastJobId) {
+    pollJob(lastJobId);
   }
-  slave.playbackRate = master.playbackRate;
 }
 
-function applyPlaybackRate() {
-  const rate = Number(elements.speedSelect.value || 1);
-  elements.baseVideo.playbackRate = rate;
-  elements.overlayVideo.playbackRate = rate;
-}
-
-function applyAudioMode() {
-  const mode = elements.audioSelect.value;
-  elements.baseVideo.muted = mode !== "default";
-  elements.overlayVideo.muted = mode !== "selected";
-}
-
-async function playBoth() {
-  alignVideos(true);
-  applyPlaybackRate();
-  applyAudioMode();
-  await Promise.allSettled([elements.baseVideo.play(), elements.overlayVideo.play()]);
-  elements.playToggle.textContent = "暂停";
-}
-
-function pauseBoth() {
-  elements.baseVideo.pause();
-  elements.overlayVideo.pause();
-  elements.playToggle.textContent = "播放";
-}
-
-function updateSeekFromVideo() {
-  if (userSeeking) return;
-  const duration = mediaDuration();
-  const current = elements.baseVideo.currentTime || 0;
-  elements.seekSlider.value = duration > 0 ? Math.round((current / duration) * 1000) : 0;
-  elements.timeText.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
-}
-
-elements.fileInput.addEventListener("change", () => {
-  const file = elements.fileInput.files[0];
-  elements.fileName.textContent = file ? file.name : "选择 MP4 / MKV 视频";
-});
-
-elements.createJob.addEventListener("click", createJob);
-
-elements.splitSlider.addEventListener("input", () => {
-  setSplit(elements.splitSlider.value);
-});
-
-elements.playToggle.addEventListener("click", () => {
-  if (elements.baseVideo.paused) {
-    playBoth();
-  } else {
-    pauseBoth();
-  }
-});
-
-elements.seekSlider.addEventListener("input", () => {
-  userSeeking = true;
-  const duration = mediaDuration();
-  const next = (Number(elements.seekSlider.value) / 1000) * duration;
-  elements.baseVideo.currentTime = next;
-  elements.overlayVideo.currentTime = next;
-  elements.timeText.textContent = `${formatTime(next)} / ${formatTime(duration)}`;
-});
-
-elements.seekSlider.addEventListener("change", () => {
-  userSeeking = false;
-  alignVideos(true);
-});
-
-elements.speedSelect.addEventListener("change", applyPlaybackRate);
-elements.audioSelect.addEventListener("change", applyAudioMode);
-elements.baseVideo.addEventListener("timeupdate", updateSeekFromVideo);
-elements.baseVideo.addEventListener("pause", pauseBoth);
-elements.baseVideo.addEventListener("ended", pauseBoth);
-elements.overlayVideo.addEventListener("pause", () => {
-  if (!elements.baseVideo.paused) elements.overlayVideo.play();
-});
-
-setInterval(() => {
-  if (!elements.baseVideo.paused) alignVideos(false);
-}, 500);
-
-setSplit(elements.splitSlider.value);
-const lastJobId = localStorage.getItem("hevc_lab_last_job");
-if (lastJobId) {
-  pollJob(lastJobId);
-} else {
-  setPlainStatus("选择一个本地视频后创建任务。");
-}
+initApp();

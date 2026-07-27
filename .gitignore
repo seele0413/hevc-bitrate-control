@@ -7,3 +7,4 @@ samples/
 work/
 *.log
 .playwright-cli/
+output/

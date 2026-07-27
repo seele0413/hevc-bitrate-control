@@ -1,28 +1,146 @@
-# H.265 默认编码与三档综合策略研究工具 V1.0
+# H.265 默认编码与 V1.4 预算中性 ROI 策略研究工具
 
-> 当前实现版本：v1.0.0  
-> 本节是 `DESIGN_V1.md` 的当前唯一有效方案。本文后续仍保留的“双方案等画质比较、部署结论”等内容只作为历史实现说明，不得覆盖本节。
+> 当前实现版本：v1.4.0
+> `## 0. v1.4.0 当前唯一方案` 是当前唯一有效方案。本文后续仍保留的 V1.3、V1.2 激进三档、V1.1 目标区间、“双方案等画质比较”和部署结论内容只作为历史实现说明，不得覆盖本节。
 
-## 0. v1.0.0 当前唯一方案
+## 0. v1.4.0 当前唯一方案
+
+### 0.1 研究目标
+
+程序对同一个输入独立生成四个 H.265 结果：
+
+1. `default_x265.mp4`：只指定 `libx265`，不传自定义 CRF、preset、AQ、ROI、降噪或帧间参数。
+2. `generic_no_roi.mp4`：通用无 ROI 方案，作为 ROI 预算基准。
+3. `budget_neutral_roi.mp4`：预算中性 ROI 方案；只有预算和重点区域门槛都通过时生成。
+4. `roi_denoise_experimental.mp4`：ROI + 降噪实验项；只有预算和重点区域门槛都通过时生成。
+
+四路结果不执行 CRF 配对、不计算 VMAF/SSIM 差值、不评选胜出方案，也不输出部署结论。三个非默认策略统一使用 VMAF ≥ 83、P5 ≥ 80、SSIM ≥ 0.950 作为最低全局画质门槛。
+
+V1.4 的核心约束是：ROI 不得额外增加总码率。ROI 只能在通用无 ROI 方案的平均视频包码率预算内重新分配码率；如果 ROI 做不到预算内保护重点区域，就标记失败，不伪造成收益。
+
+### 0.2 V1.4 策略映射
+
+| 公开策略 | 内部来源 | preset | 区域处理 | 帧间结构 | CRF 搜索 |
+|---|---|---|---|---|---|
+| 默认 | x265 原生默认 | 原生默认 | 无 | 原生默认 | 不搜索 |
+| 通用无 ROI | V1.0 原激进结构的通用版 | `medium` | 无 ROI、无降噪 | ref=6 / bframes=8 / lookahead=90 / GOP=10秒 / min=2秒 | 18～38 |
+| 预算中性 ROI | 通用无 ROI + 静态 ROI QP | `medium` | aggressive ROI QP | ref=6 / bframes=8 / lookahead=90 / GOP=10秒 / min=2秒 | 18～38 |
+| ROI + 降噪实验项 | 通用无 ROI + 静态 ROI QP + ROI 降噪 | `medium` | aggressive ROI QP + aggressive ROI 降噪 | ref=6 / bframes=8 / lookahead=90 / GOP=10秒 / min=2秒 | 18～38 |
+
+共同规则：
+
+- 三个非默认策略均启用 AQ2：`aq-mode=2`、`aq-strength=1.0`、`qg-size=32`、`aq-motion=0`。
+- 通用无 ROI 方案必须真正通用：不得调用 ROI 配置、不得生成 `addroi`、不得生成 `hqdn3d` 分区降噪，也不得因 ROI 配置分辨率不匹配而失败。
+- ROI 两路必须先通过全局 VMAF/P5/SSIM 门槛，再检查预算和重点区域局部质量。
+- ROI + 降噪实验项的滤镜顺序为“ROI 分区降噪合成 → addroi 量化区域信息 → libx265”。
+- 不启用 VBV，不缩放分辨率，不改变帧率。
+
+### 0.3 独立 CRF 搜索与 ROI 决策
+
+- 默认 x265 方案不搜索 CRF，直接编码完整输入。
+- 通用无 ROI、预算中性 ROI、ROI + 降噪实验项分别使用输入前 12 秒，在各自 CRF 范围内按 0.5 步长搜索满足 VMAF/P5/SSIM 门槛的最高 CRF。
+- 使用各档选中的 CRF 编码完整输入；完整输出未达到门槛时，只对该档按 0.5 逐级降低 CRF 并重编码，直到通过或到达 CRF 18。
+- 某档在 CRF 18 仍不合格时记录失败，不生成虚假的最终数据。
+- 编码速度只记录，不参与候选淘汰。
+- 通用无 ROI 完整输出的平均视频包码率就是 ROI 预算。
+- ROI 候选必须满足：VMAF ≥ 83、P5 ≥ 80、SSIM ≥ 0.950、平均视频包码率 ≤ 通用无 ROI 平均视频包码率。
+- ROI 候选必须对 ROI 配置中的 `critical` 与 `evidence` 区域复算局部 VMAF、P5、SSIM；三项均不得低于通用无 ROI 方案。
+- ROI 候选通过预算且重点区域不下降时可以生成输出；是否真正改善重点区域单独记录，不作为部署结论。
+
+### 0.4 码率口径与结果
+
+平均码率只使用 FFprobe 汇总视频包字节计算，不混入音频与容器开销：
+
+```text
+相对默认节省 =
+(默认方案平均视频包码率 - 当前方案平均视频包码率)
+÷ 默认方案平均视频包码率
+× 100%
+
+相对通用无 ROI 节省 =
+(通用无 ROI 平均视频包码率 - 当前方案平均视频包码率)
+÷ 通用无 ROI 平均视频包码率
+× 100%
+```
+
+公开输出：
+
+- `final_metrics.csv`
+- `final_summary.md`
+- 四个最终视频或失败记录
+
+`research_manifest.json` 额外记录 `public_mode`、`source_mode`、`strategy_generation`、`region_processing_enabled`、`roi_enabled`、`denoise_enabled`、`effective_preset`、`crf_search_max`、`budget_neutral_required`、`budget_neutral_pass`、`roi_quality_preserved`、`roi_quality_improved` 和 `saving_vs_general_no_roi_pct`，用于复现公开策略与 ROI 决策。
+
+正式接口：
+
+```powershell
+python -m hevc_lab multi-encode `
+  --input 'F:\work\课题\监控素材.mp4' `
+  --roi-config '.\configs\camera-entrance-roi.json' `
+  --output '.\results\monitor-v1_4'
+```
+
+### 0.5 本地 Web 界面
+
+V1.4 本地 Web 首页位于 `apps/demo_live`，视觉复用 `apps/demo` 的居中卡片、通用/专用 Tab、双视频重叠画面和拖动分割线。浏览器不能直接播放 `rtsp://`，因此本地 FastAPI 使用 FFmpeg 拉取两路摄像头 RTSP：`source` 为原生 H.264 编码流，`conservative` 为摄像头侧按既有保守策略输出的 H.265/HEVC 流。前端用本地 `hls.js` 播放两路浏览器可播 HLS，并通过裁剪上层视频实现实时对比。
+
+实时预览只用于“能看到实时监控画面并做肉眼对比”。带宽节省只按两路摄像头输入码流的实时视频包码率估算，公式为 `(原生 H.264 输入码率 - H.265 保守输入码率) ÷ 原生 H.264 输入码率 × 100%`；本机为了浏览器播放生成的 H.264 HLS 预览不参与节省率、VMAF、CRF 搜索或部署结论。保守策略参数沿用既有项目定义和摄像头侧配置，本地实时预览模块不得重写 CRF、GOP、ROI、降噪、AQ、preset 或 x265 参数。
+
+离线上传编码 API 和任务队列保留，仍可创建四路编码任务、查看结果并下载 H.265 输出；不评选最佳方案，不输出部署结论。`apps/demo` 保持 Cloudflare Pages 纯静态离线展示版，不接入 FastAPI、FFmpeg、上传或 RTSP。
+
+任务状态至少包括：
+
+```text
+queued
+preparing_reference
+encoding_default
+searching_general
+validating_general
+searching_roi
+validating_roi
+searching_roi_denoise
+validating_roi_denoise
+completed
+failed
+```
+
+### 0.6 V1.4 真实素材回归事实
+
+2026-07-24 使用 `F:\work\课题\监控素材.mp4` 完成 60 秒、1920×1080、20fps 四路端到端实验，结果目录为 `results/monitor-v1_4`：
+
+| 编码策略 | 状态 | CRF | 平均/尝试视频包码率 | VMAF / P5 / SSIM | 编码速度 | 相对默认节省 | 相对通用节省 | 预算中性 |
+|---|---|---:|---:|---|---:|---:|---:|:---:|
+| x265 原生默认 | 已生成 | — | 0.568393 Mbit/s | — | — | — | — | — |
+| 通用无 ROI 方案 | 已生成 | 36.5 | 0.206501 Mbit/s | 85.438 / 80.577 / 0.975043 | 2.071x | 63.67% | 0.00% | — |
+| 预算中性 ROI 方案 | 失败 | 37.5 | 0.274063 Mbit/s | 85.612 / 80.406 / 0.973342 | 2.297x | — | -32.72% | 否 |
+| ROI + 降噪实验项 | 失败 | 38.0 | 0.255483 Mbit/s | 84.908 / 81.829 / 0.971679 | 1.963x | — | -23.72% | 否 |
+
+ROI 两路全局质量均达到 VMAF/P5/SSIM 门槛，但平均视频包码率超过通用无 ROI 方案的 0.206501 Mbit/s 预算，因此 V1.4 正确标记失败，未生成 `budget_neutral_roi.mp4` 和 `roi_denoise_experimental.mp4`。已生成的 `default_x265.mp4` 与 `generic_no_roi.mp4` 均完成 FFmpeg 全文件解码检查，退出码为0。
+
+---
+
+## A. v1.2.0 历史方案
 
 ### 0.1 研究目标
 
 程序对同一个输入独立生成四个 H.265 视频：
 
 1. `default_x265.mp4`：只指定 `libx265`，不传自定义 CRF、preset、AQ、ROI、降噪或帧间参数。
-2. `composite_conservative.mp4`：保守综合策略。
-3. `composite_balanced.mp4`：均衡综合策略。
-4. `composite_aggressive.mp4`：激进综合策略。
+2. `composite_aggressive_plus.mp4`：激进+综合策略。
+3. `composite_aggressive_plus_plus.mp4`：激进++综合策略。
+4. `composite_aggressive_plus_plus_plus.mp4`：激进+++综合策略。
 
-四路结果不执行 CRF 配对、不计算 VMAF/SSIM 差值、不评选胜出方案，也不输出部署结论。三档综合策略分别搜索自己的最高合格 CRF；最终只把实际输出分辨率、平均视频包码率及相对默认方案的码率节省百分比展示给用户。
+四路结果不执行 CRF 配对、不计算 VMAF/SSIM 差值、不评选胜出方案，也不输出部署结论。三个 V1.2 激进档分别搜索自己的合格 CRF；最终只把实际输出分辨率、平均视频包码率、CRF、VMAF/P5/SSIM、编码速度和相对默认方案的码率节省百分比展示给用户。
 
-### 0.2 三档综合策略
+V1.2 暂时不输出保守、均衡和原激进档；这些旧模式仍保留为历史命令和后续消融复核对象。三个新激进档全部沿用当前激进模式的 `slow` preset，不升级到 `slower` 或 `veryslow`。
 
-| 模式 | preset | VMAF / P5 / SSIM | ref / B帧 / lookahead | 最大 / 最小 GOP |
-|---|---|---|---|---|
-| `conservative` | `medium` | 95 / 93 / 0.990 | 4 / 4 / 30 | 2秒 / 1秒 |
-| `balanced` | `medium` | 90 / 88 / 0.980 | 5 / 6 / 60 | 4秒 / 2秒 |
-| `aggressive` | `slow` | 83 / 80 / 0.950 | 6 / 8 / 90 | 10秒 / 2秒 |
+### 0.2 V1.2 三档综合策略
+
+| 模式 | 中文名 | preset | VMAF / P5 / SSIM | ref / B帧 / lookahead | 最大 / 最小 GOP | CRF 上限 |
+|---|---|---|---|---|---|---:|
+| `aggressive_plus` | 激进+ | `slow` | 83 / 80 / 0.950 | 6 / 8 / 100 | 12秒 / 2秒 | 42 |
+| `aggressive_plus_plus` | 激进++ | `slow` | 83 / 80 / 0.950 | 6 / 8 / 120 | 15秒 / 2秒 | 45 |
+| `aggressive_plus_plus_plus` | 激进+++ | `slow` | 83 / 80 / 0.950 | 6 / 8 / 150 | 20秒 / 2秒 | 48 |
 
 三档共同启用：
 
@@ -31,6 +149,22 @@
 - 当前模式的静态 ROI QP 偏移。
 - 当前模式的 ROI 保护分区降噪。
 - 不启用 VBV，不缩放分辨率，不改变帧率。
+
+静态 ROI QP 偏移：
+
+| 模式 | critical | evidence | normal | discard |
+|---|---:|---:|---:|---:|
+| `aggressive_plus` | -4 | -3 | +7 | +12 |
+| `aggressive_plus_plus` | -4 | -3 | +9 | +16 |
+| `aggressive_plus_plus_plus` | -4 | -3 | +11 | +20 |
+
+ROI 保护分区降噪：
+
+| 模式 | critical | normal | discard | evidence |
+|---|---|---|---|---|
+| `aggressive_plus` | `0.7:0.525:1.2:0.9` | `2.2:1.65:3.6:2.7` | `3.2:2.4:5.0:3.75` | 原图直通 |
+| `aggressive_plus_plus` | `0.8:0.6:1.4:1.05` | `2.6:1.95:4.4:3.3` | `3.8:2.85:6.0:4.5` | 原图直通 |
+| `aggressive_plus_plus_plus` | `0.9:0.675:1.6:1.2` | `3.0:2.25:5.2:3.9` | `4.4:3.3:7.0:5.25` | 原图直通 |
 
 组合滤镜顺序固定为：
 
@@ -41,7 +175,9 @@ ROI 分区降噪合成 → addroi 量化区域信息 → libx265
 ### 0.3 独立 CRF 搜索
 
 - 默认 x265 方案不搜索 CRF，直接编码完整输入。
-- 三档综合策略分别使用输入前 12 秒，在 CRF 18～38、步长 0.5 中搜索满足本档 VMAF、P5、SSIM 绝对门槛的最高 CRF。
+- 三档综合策略分别使用输入前 12 秒，在各自 CRF 范围内按 0.5 步长搜索满足本档 VMAF、P5、SSIM 绝对门槛的最高 CRF。
+- 激进+搜索 CRF 18～42，激进++搜索 CRF 18～45，激进+++搜索 CRF 18～48。
+- 三档之间不配对 CRF，不按 VMAF/SSIM 差值配对，也不按目标节省区间重选。
 - 使用各档选中的 CRF 编码完整输入。
 - 完整输出未达到本档门槛时，只对该档按 0.5 逐级降低 CRF 并重编码，直到通过或到达 CRF 18。
 - 某档在 CRF 18 仍不合格时记录失败，不生成虚假的最终数据。
@@ -77,12 +213,12 @@ ROI 分区降噪合成 → addroi 量化区域信息 → libx265
 python -m hevc_lab multi-encode `
   --input 'F:\work\课题\监控素材.mp4' `
   --roi-config '.\configs\camera-entrance-roi.json' `
-  --output '.\results\monitor-four-strategies'
+  --output '.\results\monitor-aggressive-plus-v1_2'
 ```
 
 ### 0.5 本地 Web 界面
 
-v1.0.0 Web 界面只服务于四路正式输出的本地展示和下载，不恢复旧版 RTSP、MediaMTX、动态码率或双方案部署结论页面。
+V1.2 Web 界面只服务于四路正式输出的本地展示和下载，不恢复旧版 RTSP、MediaMTX、动态码率或双方案部署结论页面。
 
 启动入口：
 
@@ -99,9 +235,9 @@ python -m hevc_lab web --host 127.0.0.1 --port 8000
 - 第一版线程池只允许一个编码任务运行，后续任务保持 `queued` 排队，避免 CPU 过载。
 - 上传只接受非空 MP4/MKV 文件。
 - 服务端额外生成 H.264 浏览器预览；预览只用于页面观看，不参与 H.265 码率、画质或节省指标。
-- 页面以 `default_x265` 作为底层完整视频，以当前选中的保守、均衡或激进综合策略作为上层裁剪视频，通过中间滑块改变上层可见宽度。
+- 页面以 `default_x265` 作为底层完整视频，以当前选中的激进+、激进++或激进+++综合策略作为上层裁剪视频，通过中间滑块改变上层可见宽度。
 - 两个预览视频必须同步播放、暂停、进度和倍速；只保留一路声音，另一路静音；定期检查播放时间偏差并重新对齐。
-- 页面展示四路分辨率、平均视频包码率和相对默认方案节省百分比；负节省值必须原样显示为负数。
+- 页面展示四路分辨率、平均视频包码率、CRF、VMAF/P5/SSIM、编码速度和相对默认方案节省百分比；负节省值必须原样显示为负数。
 - 页面提供四个 H.265 输出文件下载，不评选最佳方案，不输出部署结论。
 
 API：
@@ -120,19 +256,32 @@ GET  /api/jobs/{job_id}/previews/{strategy_id}
 queued
 preparing_reference
 encoding_default
-searching_conservative
-validating_conservative
-searching_balanced
-validating_balanced
-searching_aggressive
-validating_aggressive
+searching_aggressive_plus
+validating_aggressive_plus
+searching_aggressive_plus_plus
+validating_aggressive_plus_plus
+searching_aggressive_plus_plus_plus
+validating_aggressive_plus_plus_plus
 completed
 failed
 ```
 
+### 0.6 V1.2 真实素材回归事实
+
+2026-07-24 使用 `F:\work\课题\监控素材.mp4` 完成 60 秒、1920×1080、20fps 四路端到端实验，结果目录为 `results/monitor-aggressive-plus-v1_2`：
+
+| 编码策略 | CRF | 平均视频包码率 | VMAF / P5 / SSIM | 编码速度 | 相对默认节省 |
+|---|---:|---:|---|---:|---:|
+| x265 原生默认 | — | 0.568393 Mbit/s | — | — | — |
+| 激进+综合策略 | 39.0 | 0.237818 Mbit/s | 83.891 / 83.043 / 0.967868 | 0.989x | 58.16% |
+| 激进++综合策略 | 38.0 | 0.269104 Mbit/s | 83.810 / 83.265 / 0.967848 | 0.863x | 52.66% |
+| 激进+++综合策略 | 37.0 | 0.312427 Mbit/s | 83.516 / 82.978 / 0.967412 | 1.001x | 45.03% |
+
+四个最终 MP4 均通过 FFmpeg 完整解码检查。第二次相同运行确认默认、短片搜索候选和完整候选缓存命中。结果说明更长 GOP、更强背景 ROI QP 与更强降噪并不必然带来更低最终码率；当这些处理让画质边界提前下降时，程序会降低 CRF 通过门槛，最终码率可能高于较温和档。本节仍只记录数据，不评选胜出方案，也不生成部署结论。
+
 ---
 
-## 以下内容为 v0.10.0 及更早历史实现说明
+## 以下内容为 v1.0.0 及更早历史实现说明
 
 ## 1. 第一版要回答的问题
 

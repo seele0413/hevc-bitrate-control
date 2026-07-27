@@ -1,38 +1,64 @@
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePath
-from typing import Optional
+from typing import Dict, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from .. import __version__
+from ..multi_encode import MULTI_ENCODE_PIPELINE_VERSION
 from ..tools import PROJECT_ROOT
-from .jobs import JobManager, JobNotFound, JobNotReady, WEB_STAGE_ORDER
+from .jobs import (
+    JobManager,
+    JobNotFound,
+    JobNotReady,
+    STRATEGY_DOWNLOADS,
+    WEB_STAGE_ORDER,
+)
+from .streams import (
+    HLS_PLAYLIST,
+    LiveStreamManager,
+    StreamLimitExceeded,
+    StreamNotFound,
+    StreamNotReady,
+)
 
 
-FRONTEND_ROOT = PROJECT_ROOT / "apps" / "web"
+FRONTEND_ROOT = PROJECT_ROOT / "apps" / "demo_live"
 DEFAULT_JOBS_ROOT = PROJECT_ROOT / "work" / "web_jobs"
+DEFAULT_STREAMS_ROOT = PROJECT_ROOT / "work" / "live_streams"
 DEFAULT_ROI_CONFIG = PROJECT_ROOT / "configs" / "camera-entrance-roi.json"
 ALLOWED_UPLOAD_EXTENSIONS = {".mp4", ".mkv"}
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 
 
-def create_app(manager: Optional[JobManager] = None) -> FastAPI:
+def create_app(
+    manager: Optional[JobManager] = None,
+    stream_manager: Optional[LiveStreamManager] = None,
+) -> FastAPI:
     owns_manager = manager is None
+    owns_stream_manager = stream_manager is None
     active_manager = manager or JobManager(
         jobs_root=DEFAULT_JOBS_ROOT,
         roi_config_path=DEFAULT_ROI_CONFIG,
+    )
+    active_stream_manager = stream_manager or LiveStreamManager(
+        streams_root=DEFAULT_STREAMS_ROOT,
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.jobs = active_manager
+        app.state.streams = active_stream_manager
         try:
             yield
         finally:
             if owns_manager:
                 active_manager.close(wait=False)
+            if owns_stream_manager:
+                active_stream_manager.close()
 
     app = FastAPI(
         title="H.265 四路编码本地验证台",
@@ -46,6 +72,24 @@ def create_app(manager: Optional[JobManager] = None) -> FastAPI:
             "ok": True,
             "listen": "127.0.0.1 only",
             "stages": WEB_STAGE_ORDER,
+        }
+
+    @app.get("/api/runtime")
+    def runtime():
+        return {
+            "ok": True,
+            "app_version": __version__,
+            "pipeline_version": MULTI_ENCODE_PIPELINE_VERSION,
+            "strategy_ids": list(STRATEGY_DOWNLOADS),
+            "stages": WEB_STAGE_ORDER,
+            "live_preview": {
+                "enabled": True,
+                "protocol": "dual RTSP camera streams to HLS preview",
+                "playlist": HLS_PLAYLIST,
+                "variants": ["source", "conservative"],
+                "frontend": "apps/demo_live",
+                "saving_basis": "camera_input_packet_bitrate",
+            },
         }
 
     @app.post("/api/jobs", status_code=202)
@@ -116,6 +160,54 @@ def create_app(manager: Optional[JobManager] = None) -> FastAPI:
         except JobNotFound:
             raise HTTPException(status_code=404, detail="预览不存在")
         return FileResponse(path, media_type="video/mp4")
+
+    @app.post("/api/streams", status_code=202)
+    def create_stream(payload: Dict[str, str] = Body(...)):
+        payload = payload or {}
+        source_rtsp_url = payload.get("source_rtsp_url") or payload.get("rtsp_url") or ""
+        conservative_rtsp_url = payload.get("conservative_rtsp_url")
+        if not source_rtsp_url:
+            raise HTTPException(status_code=400, detail="请输入原生 H.264 RTSP 地址")
+        if "rtsp_url" not in payload and not conservative_rtsp_url:
+            raise HTTPException(status_code=400, detail="请输入 H.265 保守策略 RTSP 地址")
+        try:
+            return active_stream_manager.create_stream(
+                source_rtsp_url,
+                conservative_rtsp_url,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except StreamLimitExceeded as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @app.get("/api/streams/{stream_id}")
+    def get_stream(stream_id: str):
+        try:
+            return active_stream_manager.get_status(stream_id)
+        except StreamNotFound:
+            raise HTTPException(status_code=404, detail="拉流任务不存在")
+
+    @app.delete("/api/streams/{stream_id}")
+    def stop_stream(stream_id: str):
+        try:
+            return active_stream_manager.stop_stream(stream_id)
+        except StreamNotFound:
+            raise HTTPException(status_code=404, detail="拉流任务不存在")
+
+    @app.get("/api/streams/{stream_id}/hls/{filename:path}")
+    def hls_file(stream_id: str, filename: str):
+        try:
+            path = active_stream_manager.get_hls_file(stream_id, filename)
+        except StreamNotReady:
+            raise HTTPException(status_code=404, detail="HLS 文件尚未生成")
+        except StreamNotFound:
+            raise HTTPException(status_code=404, detail="HLS 文件不存在")
+        media_type = (
+            "application/vnd.apple.mpegurl"
+            if path.suffix.lower() == ".m3u8"
+            else "video/mp2t"
+        )
+        return FileResponse(path, media_type=media_type)
 
     app.mount(
         "/",

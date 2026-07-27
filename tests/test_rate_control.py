@@ -79,7 +79,7 @@ class RateControlTests(unittest.TestCase):
         plan = v1_comparison_plan("balanced")
         settings = RateControlSettings(300, 900)
         params = build_x265_params(plan.optimized, 25, settings)
-        self.assertIn("keyint=100", params)
+        self.assertIn("keyint=250", params)
         self.assertIn("vbv-maxrate=300", params)
         self.assertIn("vbv-bufsize=900", params)
 

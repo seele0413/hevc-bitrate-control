@@ -4,6 +4,8 @@ from hevc_lab.core.configs import (
     available_modes,
     get_mode_policy,
     interframe_configs,
+    multi_encode_modes,
+    multi_encode_strategies,
     v1_comparison_plan,
 )
 
@@ -40,7 +42,7 @@ class InterConfigTests(unittest.TestCase):
         baseline_params = dict(item.split("=", 1) for item in baseline)
         optimized_params = dict(item.split("=", 1) for item in optimized)
         self.assertEqual(baseline_params["keyint"], "50")
-        self.assertEqual(optimized_params["keyint"], "100")
+        self.assertEqual(optimized_params["keyint"], "250")
         self.assertEqual(baseline_params["min-keyint"], "25")
         self.assertEqual(optimized_params["min-keyint"], "50")
         changed = {
@@ -53,34 +55,152 @@ class InterConfigTests(unittest.TestCase):
     def test_modes_follow_declared_pareto_order(self):
         self.assertEqual(
             available_modes(),
-            ("conservative", "balanced", "aggressive"),
+            (
+                "conservative",
+                "balanced",
+                "aggressive",
+                "aggressive_plus",
+                "aggressive_plus_plus",
+                "aggressive_plus_plus_plus",
+            ),
         )
         policies = [get_mode_policy(name) for name in available_modes()]
-        self.assertEqual([item.default_crf for item in policies], [20.0, 22.0, 24.0])
-        self.assertEqual([item.target_vmaf for item in policies], [95.0, 90.0, 83.0])
-        self.assertEqual([item.target_vmaf_p5 for item in policies], [93.0, 88.0, 80.0])
-        self.assertEqual([item.target_ssim for item in policies], [0.990, 0.980, 0.950])
-        self.assertEqual([item.preset for item in policies], ["medium", "medium", "slow"])
-        self.assertEqual([item.min_speed_x for item in policies], [0.97, 0.97, None])
+        self.assertEqual(
+            [item.default_crf for item in policies],
+            [20.0, 22.0, 24.0, 24.0, 24.0, 24.0],
+        )
+        self.assertEqual(
+            [item.target_vmaf for item in policies],
+            [90.0, 90.0, 83.0, 83.0, 83.0, 83.0],
+        )
+        self.assertEqual(
+            [item.target_vmaf_p5 for item in policies],
+            [88.0, 88.0, 80.0, 80.0, 80.0, 80.0],
+        )
+        self.assertEqual(
+            [item.target_ssim for item in policies],
+            [0.980, 0.980, 0.950, 0.950, 0.950, 0.950],
+        )
+        self.assertEqual(
+            [item.preset for item in policies],
+            ["medium", "medium", "slow", "slow", "slow", "slow"],
+        )
+        self.assertEqual(
+            [item.min_speed_x for item in policies],
+            [0.97, 0.97, None, None, None, None],
+        )
+        self.assertEqual(
+            [
+                (item.target_saving_min_pct, item.target_saving_max_pct)
+                for item in policies
+            ],
+            [
+                (10.0, 15.0),
+                (20.0, 30.0),
+                (None, None),
+                (None, None),
+                (None, None),
+                (None, None),
+            ],
+        )
         self.assertEqual(
             [item.to_dict()["speed_gate_enabled"] for item in policies],
-            [True, True, False],
+            [True, True, False, False, False, False],
         )
-        self.assertEqual([item.vbv_peak_ratio for item in policies], [2.0, 1.5, 1.25])
-        self.assertEqual([item.vbv_buffer_seconds for item in policies], [4.0, 3.0, 2.0])
+        self.assertEqual(
+            [item.vbv_peak_ratio for item in policies],
+            [2.0, 1.5, 1.25, 1.25, 1.25, 1.25],
+        )
+        self.assertEqual(
+            [item.vbv_buffer_seconds for item in policies],
+            [4.0, 3.0, 2.0, 2.0, 2.0, 2.0],
+        )
+        self.assertEqual(
+            [item.crf_search_max for item in policies],
+            [38.0, 38.0, 38.0, 42.0, 45.0, 48.0],
+        )
         plans = [v1_comparison_plan(name) for name in available_modes()]
         self.assertEqual(
             [item.optimized.gop_seconds for item in plans],
-            [2, 4, 10],
+            [8, 10, 10, 12, 15, 20],
         )
         self.assertEqual(
             [item.optimized.lookahead for item in plans],
-            [30, 60, 90],
+            [45, 60, 90, 100, 120, 150],
         )
-        aggressive_params = plans[-1].optimized.x265_params(20)
+        conservative_params = plans[0].optimized.x265_params(20)
+        balanced_params = plans[1].optimized.x265_params(20)
+        aggressive_params = plans[2].optimized.x265_params(20)
+        aggressive_plus_params = plans[3].optimized.x265_params(20)
+        aggressive_plus_plus_params = plans[4].optimized.x265_params(20)
+        aggressive_plus_plus_plus_params = plans[5].optimized.x265_params(20)
+        self.assertIn("keyint=160", conservative_params)
+        self.assertIn("min-keyint=40", conservative_params)
+        self.assertIn("keyint=200", balanced_params)
+        self.assertIn("min-keyint=40", balanced_params)
         self.assertIn("keyint=200", aggressive_params)
         self.assertIn("min-keyint=40", aggressive_params)
         self.assertIn("b-pyramid=1", aggressive_params)
+        self.assertIn("keyint=240", aggressive_plus_params)
+        self.assertIn("min-keyint=40", aggressive_plus_params)
+        self.assertIn("keyint=300", aggressive_plus_plus_params)
+        self.assertIn("min-keyint=40", aggressive_plus_plus_params)
+        self.assertIn("keyint=400", aggressive_plus_plus_plus_params)
+        self.assertIn("min-keyint=40", aggressive_plus_plus_plus_params)
+
+    def test_v1_4_multi_encode_outputs_budget_neutral_roi_plan(self):
+        self.assertEqual(
+            multi_encode_modes(),
+            (
+                "general",
+                "roi",
+                "roi_denoise",
+            ),
+        )
+        strategies = multi_encode_strategies()
+        self.assertEqual(
+            [item.strategy_id for item in strategies],
+            [
+                "generic_no_roi",
+                "budget_neutral_roi",
+                "roi_denoise_experimental",
+            ],
+        )
+        self.assertEqual(
+            [item.source_mode for item in strategies],
+            ["aggressive", "aggressive", "aggressive"],
+        )
+        self.assertEqual(
+            [item.effective_preset for item in strategies],
+            ["medium", "medium", "medium"],
+        )
+        self.assertEqual(
+            [item.crf_search_max for item in strategies],
+            [38.0, 38.0, 38.0],
+        )
+        self.assertEqual(
+            [
+                (item.target_vmaf, item.target_vmaf_p5, item.target_ssim)
+                for item in strategies
+            ],
+            [(83.0, 80.0, 0.950)] * 3,
+        )
+        self.assertEqual(
+            [(item.roi_enabled, item.denoise_enabled) for item in strategies],
+            [(False, False), (True, False), (True, True)],
+        )
+        self.assertEqual(
+            [item.budget_neutral_required for item in strategies],
+            [False, True, True],
+        )
+        self.assertEqual(
+            [item.roi_quality_required for item in strategies],
+            [False, True, True],
+        )
+        self.assertEqual(
+            [item.budget_reference for item in strategies],
+            [None, "generic_no_roi", "generic_no_roi"],
+        )
 
     def test_modes_share_baseline_params_but_use_their_declared_preset(self):
         baseline_params = {
@@ -90,7 +210,7 @@ class InterConfigTests(unittest.TestCase):
         self.assertEqual(len(baseline_params), 1)
         self.assertEqual(
             [v1_comparison_plan(name).conditions.preset for name in available_modes()],
-            ["medium", "medium", "slow"],
+            ["medium", "medium", "slow", "slow", "slow", "slow"],
         )
 
     def test_unknown_mode_is_rejected(self):

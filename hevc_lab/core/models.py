@@ -563,11 +563,54 @@ class ModePolicy:
     min_source_saving_pct: float
     vbv_peak_ratio: float
     vbv_buffer_seconds: float
+    target_saving_min_pct: Optional[float] = None
+    target_saving_max_pct: Optional[float] = None
+    crf_search_min: float = 18.0
+    crf_search_max: float = 38.0
+    crf_search_step: float = 0.5
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             **asdict(self),
             "speed_gate_enabled": self.min_speed_x is not None,
+        }
+
+
+@dataclass(frozen=True)
+class MultiEncodeStrategy:
+    public_mode: str
+    strategy_id: str
+    title: str
+    description: str
+    source_mode: str
+    strategy_generation: str
+    effective_preset: str
+    roi_enabled: bool
+    denoise_enabled: bool
+    target_vmaf: float
+    target_vmaf_p5: float
+    target_ssim: float
+    crf_search_min: float = 18.0
+    crf_search_max: float = 38.0
+    crf_search_step: float = 0.5
+    budget_reference: Optional[str] = None
+    budget_neutral_required: bool = False
+    roi_quality_required: bool = False
+    experimental: bool = False
+
+    @property
+    def output_filename(self) -> str:
+        return f"{self.strategy_id}.mp4"
+
+    @property
+    def region_processing_enabled(self) -> bool:
+        return self.roi_enabled or self.denoise_enabled
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            **asdict(self),
+            "output_filename": self.output_filename,
+            "region_processing_enabled": self.region_processing_enabled,
         }
 
 

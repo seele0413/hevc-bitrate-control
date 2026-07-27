@@ -111,14 +111,28 @@ class ROIConfigurationTests(unittest.TestCase):
     def test_mode_qp_and_qoffset_conversion_follow_design(self):
         policies = [
             roi_quantization_policy(mode)
-            for mode in ("conservative", "balanced", "aggressive")
+            for mode in (
+                "conservative",
+                "balanced",
+                "aggressive",
+                "aggressive_plus",
+                "aggressive_plus_plus",
+                "aggressive_plus_plus_plus",
+            )
         ]
         self.assertEqual(
             [(item.critical, item.evidence, item.normal, item.discard) for item in policies],
-            [(-2, -2, 1, 3), (-3, -2, 3, 5), (-4, -3, 5, 8)],
+            [
+                (-1, -2, 4, 6),
+                (-2, -2, 5, 8),
+                (-4, -3, 5, 8),
+                (-4, -3, 7, 12),
+                (-4, -3, 9, 16),
+                (-4, -3, 11, 20),
+            ],
         )
-        self.assertAlmostEqual(policies[1].qoffset("critical"), -3 / 51)
-        self.assertEqual(policies[1].qoffset_expression("discard"), "5/51")
+        self.assertAlmostEqual(policies[1].qoffset("critical"), -2 / 51)
+        self.assertEqual(policies[1].qoffset_expression("discard"), "8/51")
 
     def test_filter_order_preserves_priority_and_appends_normal_fallback(self):
         settings = load_roi_settings(DEFAULT_CONFIG, "balanced")
@@ -129,7 +143,7 @@ class ROIConfigurationTests(unittest.TestCase):
         self.assertEqual(entries[-1][0].region_id, "__normal_fallback__")
         chain = settings.filter_chain()
         self.assertTrue(chain.startswith("addroi=x=1504:y=16:w=384:h=112:qoffset=-2/51:clear=1"))
-        self.assertTrue(chain.endswith("addroi=x=0:y=0:w=1920:h=1080:qoffset=3/51"))
+        self.assertTrue(chain.endswith("addroi=x=0:y=0:w=1920:h=1080:qoffset=5/51"))
 
 
 class ROISelectionTests(unittest.TestCase):

@@ -31,8 +31,8 @@ from .metrics import compute_quality
 from .reports import write_quality_search_reports
 
 
-SEARCH_CACHE_SCHEMA_VERSION = 3
-SEARCH_EVALUATOR_VERSION = "x265-vmaf-roi-denoise-composite-v3"
+SEARCH_CACHE_SCHEMA_VERSION = 7
+SEARCH_EVALUATOR_VERSION = "x265-vmaf-budget-neutral-roi-v1.4"
 
 
 def build_candidate_cache_key(
@@ -296,9 +296,18 @@ def run_scheme_quality_search(
     adaptive_quantization: Optional[AdaptiveQuantizationSettings] = None,
     roi_settings: Optional[ROISettings] = None,
     denoise_settings: Optional[DenoiseSettings] = None,
+    crf_min: float = 18.0,
+    crf_max: float = 38.0,
+    crf_step: float = 0.5,
 ) -> QualitySearchResult:
     """在已准备好的同一参考片段上搜索一个编码方案。"""
-    spec = QualitySearchSpec(thresholds=thresholds)
+    spec = QualitySearchSpec(
+        thresholds=thresholds,
+        crf_min=crf_min,
+        crf_max=crf_max,
+        crf_step=crf_step,
+        anchors=(crf_min, 28.0, crf_max) if crf_min <= 28.0 <= crf_max else (crf_min, crf_max),
+    )
     def evaluate(crf: float) -> CandidateResult:
         return evaluate_scheme_crf(
             toolchain=toolchain,
@@ -365,6 +374,9 @@ def run_single_quality_search(
         conditions=conditions,
         thresholds=thresholds,
         min_speed_x=min_speed_x,
+        crf_min=policy.crf_search_min,
+        crf_max=policy.crf_search_max,
+        crf_step=policy.crf_search_step,
     )
     return write_quality_search_reports(
         output_dir=output_dir,

@@ -92,15 +92,22 @@ class DenoiseSettingsTests(unittest.TestCase):
     def test_three_modes_increase_background_strength_and_bypass_evidence(self):
         policies = [
             denoise_policy_for_mode(mode)
-            for mode in ("conservative", "balanced", "aggressive")
+            for mode in (
+                "conservative",
+                "balanced",
+                "aggressive",
+                "aggressive_plus",
+                "aggressive_plus_plus",
+                "aggressive_plus_plus_plus",
+            )
         ]
         self.assertEqual(
             [item.normal.luma_spatial for item in policies],
-            [0.8, 1.2, 1.8],
+            [1.2, 1.6, 1.8, 2.2, 2.6, 3.0],
         )
         self.assertEqual(
             [item.discard.luma_temporal for item in policies],
-            [1.8, 3.0, 4.0],
+            [3.4, 4.0, 4.0, 5.0, 6.0, 7.0],
         )
         self.assertTrue(all(not item.evidence.enabled for item in policies))
 
@@ -113,7 +120,7 @@ class DenoiseSettingsTests(unittest.TestCase):
         self.assertEqual(roles[-1], "evidence")
         graph = settings.filter_complex()
         self.assertIn("[0:v]split=6", graph)
-        self.assertIn("[base_src]hqdn3d=1.2:0.9:2:1.5", graph)
+        self.assertIn("[base_src]hqdn3d=1.6:1.2:2.8:2.1", graph)
         self.assertIn("crop=384:112:1504:16,null[patch_4]", graph)
         self.assertTrue(graph.endswith("format=yuv420p[denoised]"))
 
