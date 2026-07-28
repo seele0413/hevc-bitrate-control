@@ -1,4 +1,5 @@
 import json
+import math
 import queue
 import shutil
 import subprocess
@@ -27,7 +28,9 @@ HEVC_FIXED_PRESET = "medium"
 PREVIEW_CRF = 18
 PREVIEW_PRESET = "ultrafast"
 BITRATE_WINDOW_SECONDS = 30.0
-FRAME_QUEUE_SIZE = 2
+LIVE_BUFFER_SECONDS = 5.0
+LIVE_BUFFER_MAX_BYTES = 512 * 1024 * 1024
+MIN_FRAME_QUEUE_SIZE = 2
 HEARTBEAT_TIMEOUT_SECONDS = 10.0
 
 ToolchainFactory = Callable[[], Toolchain]
@@ -104,6 +107,13 @@ def _fps_from_fraction(value: str) -> Optional[float]:
         return None if den == 0 else float(numerator) / den
     except ValueError:
         return None
+
+
+def _frame_queue_capacity(width: int, height: int, fps: float) -> int:
+    frame_size = max(1, width * height * 3 // 2)
+    target_frames = max(MIN_FRAME_QUEUE_SIZE, math.ceil(fps * LIVE_BUFFER_SECONDS))
+    memory_limited_frames = max(MIN_FRAME_QUEUE_SIZE, LIVE_BUFFER_MAX_BYTES // frame_size)
+    return min(target_frames, memory_limited_frames)
 
 
 @dataclass
@@ -192,9 +202,8 @@ class LiveStream:
     stopped_at: Optional[str] = None
     ingest_process: Optional[subprocess.Popen] = field(default=None, repr=False)
     stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
-    frame_queue: queue.Queue = field(
-        default_factory=lambda: queue.Queue(maxsize=FRAME_QUEUE_SIZE), repr=False
-    )
+    frame_queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
+    frame_queue_capacity: int = MIN_FRAME_QUEUE_SIZE
     threads: List[threading.Thread] = field(default_factory=list, repr=False)
     source_frames: int = 0
     delivered_frames: int = 0
@@ -244,6 +253,14 @@ class LiveStream:
         h264_url = self.playlist_url("h264_native")
         h265_url = self.playlist_url("h265_optimized")
         probes = {variant: dict(output.probe) for variant, output in self.outputs.items()}
+        fps = self.source_probe.get("fps")
+        queue_depth = self.frame_queue.qsize()
+        queue_seconds = queue_depth / fps if isinstance(fps, (int, float)) and fps > 0 else None
+        queue_capacity_seconds = (
+            self.frame_queue_capacity / fps
+            if isinstance(fps, (int, float)) and fps > 0
+            else None
+        )
         return {
             "stream_id": self.stream_id,
             "status": self.status,
@@ -259,6 +276,13 @@ class LiveStream:
             "preview_codec": "h264",
             "preview_only": True,
             "dropped_frames": self.dropped_frames,
+            "frame_buffer": {
+                "policy": "continuity_first_block_when_full",
+                "depth_frames": queue_depth,
+                "capacity_frames": self.frame_queue_capacity,
+                "buffered_seconds": queue_seconds,
+                "capacity_seconds": queue_capacity_seconds,
+            },
             "error": self.error,
             "last_error": self.error,
             "created_at": self.created_at,
@@ -371,6 +395,7 @@ class LiveStreamManager:
                 preview_dir=preview_dir,
                 probe=self._encoded_probe(source_probe, variant),
             )
+        frame_queue_capacity = _frame_queue_capacity(int(width), int(height), float(fps))
         stream = LiveStream(
             stream_id=stream_id,
             source_url=source_url,
@@ -378,6 +403,8 @@ class LiveStreamManager:
             stream_dir=stream_dir,
             source_probe=source_probe,
             outputs=outputs,
+            frame_queue=queue.Queue(maxsize=frame_queue_capacity),
+            frame_queue_capacity=frame_queue_capacity,
         )
         with self._lock:
             self._streams[stream_id] = stream
@@ -525,20 +552,12 @@ class LiveStreamManager:
                 return
             with self._lock:
                 stream.source_frames += 1
-            try:
-                stream.frame_queue.put_nowait(frame)
-            except queue.Full:
+            while not stream.stop_event.is_set():
                 try:
-                    stream.frame_queue.get_nowait()
-                except queue.Empty:
-                    pass
-                with self._lock:
-                    stream.dropped_frames += 1
-                try:
-                    stream.frame_queue.put_nowait(frame)
+                    stream.frame_queue.put(frame, timeout=0.5)
+                    break
                 except queue.Full:
-                    with self._lock:
-                        stream.dropped_frames += 1
+                    continue
 
     def _fanout_frames(self, stream: LiveStream) -> None:
         while not stream.stop_event.is_set():
@@ -923,7 +942,7 @@ class LiveStreamManager:
             "-hls_time",
             "1",
             "-hls_list_size",
-            "10",
+            "20",
             "-hls_flags",
             "delete_segments+omit_endlist+independent_segments",
             "-hls_segment_filename",

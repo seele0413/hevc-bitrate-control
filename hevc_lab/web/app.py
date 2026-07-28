@@ -61,7 +61,7 @@ def create_app(
                 active_stream_manager.close()
 
     app = FastAPI(
-        title="V1.6 两路编码本地验证台",
+        title="V1.7 两路编码本地验证台",
         version="1.0.0",
         lifespan=lifespan,
     )

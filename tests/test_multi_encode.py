@@ -635,9 +635,9 @@ class MultiEncodeDecisionTests(unittest.TestCase):
             self.assertIsNone(evaluate.call_args.kwargs["denoise_settings"])
             self.assertEqual(evaluate.call_args.kwargs["conditions"].preset, "medium")
             self.assertIn("keyint=200", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
-            self.assertIn("ref=6", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
-            self.assertIn("bframes=8", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
-            self.assertIn("rc-lookahead=90", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
+            self.assertIn("ref=4", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
+            self.assertIn("bframes=4", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
+            self.assertIn("rc-lookahead=45", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
 
     def test_run_multi_encode_outputs_h264_native_and_fixed_hevc(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -694,7 +694,7 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                     "hevc_fixed",
                 ],
             )
-            self.assertEqual(payload["pipeline_version"], "v1.6.0")
+            self.assertEqual(payload["pipeline_version"], "v1.7.0")
             self.assertEqual(payload["comparison_policy"]["default_strategy_id"], "default_h264")
             self.assertFalse(payload["comparison_policy"]["roi_enabled"])
 

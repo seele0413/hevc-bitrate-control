@@ -83,7 +83,7 @@ def write_fake_payload(output_dir: Path) -> Dict:
         (output_dir / report).write_text("report", encoding="utf-8")
     return {
         "schema_version": 6,
-        "pipeline_version": "v1.6.0",
+        "pipeline_version": "v1.7.0",
         "study": "test",
         "input": {
             "path": str(output_dir / "input.mp4"),
@@ -188,8 +188,8 @@ class WebApiTests(unittest.TestCase):
 
         with self.make_client(runner) as client:
             runtime = client.get("/api/runtime").json()
-        self.assertEqual(runtime["pipeline_version"], "v1.6.0")
-        self.assertEqual(runtime["app_version"], "1.6.0")
+        self.assertEqual(runtime["pipeline_version"], "v1.7.0")
+        self.assertEqual(runtime["app_version"], "1.7.0")
         self.assertEqual(
             runtime["strategy_ids"],
             [
@@ -304,6 +304,9 @@ class LiveStreamManagerTests(unittest.TestCase):
             self.assertEqual(status["status"], "starting")
             self.assertNotIn("secret", status["masked_url"])
             self.assertIn("masked_urls", status)
+            self.assertEqual(status["frame_buffer"]["policy"], "continuity_first_block_when_full")
+            self.assertEqual(status["frame_buffer"]["capacity_frames"], 100)
+            self.assertAlmostEqual(status["frame_buffer"]["capacity_seconds"], 5.0)
             self.assertIn("h264_native_playlist_url", status)
             self.assertIn("h265_optimized_playlist_url", status)
             self.assertIsNone(status["h264_native_playlist_url"])
@@ -319,14 +322,15 @@ class LiveStreamManagerTests(unittest.TestCase):
             self.assertIn("libx265", h265_encoder)
             self.assertIn("-preset medium", " ".join(h265_encoder))
             self.assertIn("-crf 36.0", " ".join(h265_encoder))
-            self.assertIn("ref=6", " ".join(h265_encoder))
-            self.assertIn("bframes=8", " ".join(h265_encoder))
-            self.assertIn("rc-lookahead=90", " ".join(h265_encoder))
+            self.assertIn("ref=4", " ".join(h265_encoder))
+            self.assertIn("bframes=4", " ".join(h265_encoder))
+            self.assertIn("rc-lookahead=45", " ".join(h265_encoder))
             for preview in (h264_preview, h265_preview):
                 self.assertIn("libx264", preview)
                 self.assertIn("-preset ultrafast", " ".join(preview))
                 self.assertIn("-crf 18", " ".join(preview))
                 self.assertIn("-tune zerolatency", " ".join(preview))
+                self.assertIn("-hls_list_size 20", " ".join(preview))
                 self.assertIn("delete_segments+omit_endlist+independent_segments", " ".join(preview))
             stream_dir = root / "live_streams" / status["stream_id"]
             (stream_dir / "h264_native" / "live.m3u8").write_text("#EXTM3U\n", encoding="utf-8")

@@ -45,8 +45,8 @@ def multi_encode_strategies() -> Tuple[MultiEncodeStrategy, ...]:
             strategy_id="hevc_fixed",
             title="H.265 固定参数方案",
             description=(
-                "CRF 36.0、preset medium、GOP 10s、ref 6、b-frames 8、"
-                "lookahead 90；无 ROI、无降噪。"
+                "CRF 36.0、preset medium、GOP 2-10s、ref 4、b-frames 4、"
+                "lookahead 45；无 ROI、无降噪。"
             ),
             source_mode="aggressive",
             strategy_generation="v1.6_fixed_hevc_no_roi_no_denoise",
@@ -268,10 +268,10 @@ def _mode_definitions() -> Dict[str, Tuple[ModePolicy, InterConfig]]:
                 name="optimized",
                 title="激进模式帧间优化 H.265",
                 description="使用更多参考帧、B 帧、更深前向分析和 10 秒最大 GOP。",
-                ref=6,
-                bframes=8,
+                ref=4,
+                bframes=4,
                 b_adapt=2,
-                lookahead=90,
+                lookahead=45,
                 gop_seconds=10,
                 min_gop_seconds=2,
                 scenecut=40,

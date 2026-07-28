@@ -126,7 +126,7 @@ class InterConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             [item.optimized.lookahead for item in plans],
-            [45, 60, 90, 100, 120, 150],
+            [45, 60, 45, 100, 120, 150],
         )
         conservative_params = plans[0].optimized.x265_params(20)
         balanced_params = plans[1].optimized.x265_params(20)

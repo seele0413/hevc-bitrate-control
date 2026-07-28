@@ -33,6 +33,12 @@ const players = {
   h265_optimized: null,
 };
 
+const STARTUP_BUFFER_SECONDS = 5;
+const SOFT_SYNC_THRESHOLD_SECONDS = 0.08;
+const HARD_SYNC_THRESHOLD_SECONDS = 3;
+const SLOW_PLAYBACK_RATE = 0.98;
+const FAST_PLAYBACK_RATE = 1.02;
+
 let dragging = false;
 let streamId = null;
 let pollTimer = null;
@@ -41,6 +47,8 @@ let heartbeatTimer = null;
 let h264PlaylistUrl = null;
 let h265PlaylistUrl = null;
 let latestPayload = null;
+let playbackReady = false;
+let playbackStarted = false;
 
 function setSplit(pct) {
   const next = Math.max(0, Math.min(100, pct));
@@ -142,18 +150,64 @@ function updateLatencyLabels() {
   els.h265Latency.textContent = formatLatency(playerLatency(els.h265Video, "h265_optimized"));
 }
 
-function syncPlayers() {
+function playerTimeline(video) {
+  if (!video.seekable || video.seekable.length === 0) return null;
+  const index = video.seekable.length - 1;
+  const start = video.seekable.start(index);
+  const end = video.seekable.end(index);
+  return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+}
+
+function maybeStartBufferedPlayback() {
+  if (playbackReady) return true;
   const videos = [els.h264Video, els.h265Video];
-  if (videos.some((video) => !video.seekable || video.seekable.length === 0)) return;
-  const starts = videos.map((video) => video.seekable.start(video.seekable.length - 1));
-  const edges = videos.map((video) => video.seekable.end(video.seekable.length - 1));
-  const target = Math.max(Math.max(...starts), Math.min(...edges) - 2);
-  if (!Number.isFinite(target) || target > Math.min(...edges)) return;
+  const timelines = videos.map(playerTimeline);
+  if (timelines.some((timeline) => !timeline)) return false;
+  const commonStart = Math.max(...timelines.map((timeline) => timeline.start));
+  const commonEnd = Math.min(...timelines.map((timeline) => timeline.end));
+  if (commonEnd - commonStart < STARTUP_BUFFER_SECONDS) return false;
+  const target = commonEnd - STARTUP_BUFFER_SECONDS;
   videos.forEach((video) => {
-    if (!Number.isFinite(video.currentTime) || Math.abs(video.currentTime - target) > 0.5) {
-      video.currentTime = target;
-    }
+    video.currentTime = target;
+    video.playbackRate = 1;
   });
+  playbackReady = true;
+  els.playBtn.disabled = false;
+  if (!playbackStarted) playBoth();
+  return true;
+}
+
+function syncPlayers() {
+  if (!playbackReady && !maybeStartBufferedPlayback()) return;
+  const videos = [els.h264Video, els.h265Video];
+  if (videos.some((video) => video.paused)) return;
+  const timelines = videos.map(playerTimeline);
+  if (timelines.some((timeline) => !timeline)) return;
+  const delta = videos[0].currentTime - videos[1].currentTime;
+  if (!Number.isFinite(delta)) return;
+
+  if (Math.abs(delta) > HARD_SYNC_THRESHOLD_SECONDS) {
+    const commonStart = Math.max(...timelines.map((timeline) => timeline.start));
+    const commonEnd = Math.min(...timelines.map((timeline) => timeline.end));
+    const target = Math.max(commonStart, Math.min(...videos.map((video) => video.currentTime)));
+    if (target <= commonEnd) {
+      videos.forEach((video) => {
+        video.currentTime = target;
+        video.playbackRate = 1;
+      });
+    }
+    return;
+  }
+
+  if (Math.abs(delta) <= SOFT_SYNC_THRESHOLD_SECONDS) {
+    videos.forEach((video) => { video.playbackRate = 1; });
+  } else if (delta > 0) {
+    videos[0].playbackRate = SLOW_PLAYBACK_RATE;
+    videos[1].playbackRate = FAST_PLAYBACK_RATE;
+  } else {
+    videos[0].playbackRate = FAST_PLAYBACK_RATE;
+    videos[1].playbackRate = SLOW_PLAYBACK_RATE;
+  }
 }
 
 function updateSaving(payload) {
@@ -170,9 +224,10 @@ function attachHls(video, url, key) {
   if (window.Hls && window.Hls.isSupported()) {
     const player = new window.Hls({
       lowLatencyMode: false,
-      liveSyncDurationCount: 2,
-      maxLiveSyncPlaybackRate: 1.25,
-      maxBufferLength: 8,
+      liveSyncDurationCount: 5,
+      maxLiveSyncPlaybackRate: FAST_PLAYBACK_RATE,
+      maxBufferLength: 20,
+      backBufferLength: 20,
     });
     player.on(window.Hls.Events.ERROR, (_event, data) => {
       if (!data || !data.fatal) return;
@@ -207,6 +262,8 @@ function detachPlayers() {
   h264PlaylistUrl = null;
   h265PlaylistUrl = null;
   latestPayload = null;
+  playbackReady = false;
+  playbackStarted = false;
   for (const video of [els.h264Video, els.h265Video]) {
     video.pause();
     video.removeAttribute("src");
@@ -224,6 +281,8 @@ function detachPlayers() {
 }
 
 function playBoth() {
+  if (!playbackReady) return;
+  playbackStarted = true;
   els.h264Video.play().catch(() => {});
   els.h265Video.play().catch(() => {});
   els.controls.classList.add("playing");
@@ -233,6 +292,7 @@ function pauseBoth() {
   els.h264Video.pause();
   els.h265Video.pause();
   els.controls.classList.remove("playing");
+  for (const video of [els.h264Video, els.h265Video]) video.playbackRate = 1;
 }
 
 function updateStatus(payload) {
@@ -274,8 +334,7 @@ function updateStatus(payload) {
     els.stage.classList.add("active");
   }
   if (h264PlaylistUrl && h265PlaylistUrl) {
-    els.playBtn.disabled = false;
-    playBoth();
+    maybeStartBufferedPlayback();
   }
   if (payload.status === "failed" || payload.status === "stopped") {
     stopPolling();
@@ -346,7 +405,7 @@ async function checkRuntime() {
     const runtime = await fetchJson("/api/runtime", { cache: "no-store" });
     const variants = runtime.live_preview?.variants || [];
     if (
-      runtime.pipeline_version !== "v1.6.0" ||
+      runtime.pipeline_version !== "v1.7.0" ||
       runtime.live_preview?.frontend !== "apps/web" ||
       runtime.live_preview?.preview_codec !== "h264" ||
       !variants.includes("h264_native") ||
