@@ -166,3 +166,37 @@ def encode_default_x265(
         "elapsed": elapsed,
         "speed": source.duration_seconds / elapsed,
     }
+
+
+def encode_default_h264(
+    toolchain: Toolchain,
+    source: VideoInfo,
+    destination: Path,
+    log_path: Path,
+) -> Dict[str, float]:
+    """只选择 libx264，保留 FFmpeg/libx264 的原生默认编码参数。"""
+    command = [
+        toolchain.ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-i",
+        source.path,
+        "-map",
+        "0:v:0",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-movflags",
+        "+faststart",
+        destination,
+    ]
+    started = time.perf_counter()
+    completed = run_process(command)
+    elapsed = max(time.perf_counter() - started, 0.001)
+    log_path.write_text(completed.stdout + "\n" + completed.stderr, encoding="utf-8")
+    return {
+        "elapsed": elapsed,
+        "speed": source.duration_seconds / elapsed,
+    }

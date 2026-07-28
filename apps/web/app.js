@@ -1,435 +1,467 @@
 const els = {
-  tabs: document.querySelectorAll(".strategy-tab"),
-  viewerGeneric: document.querySelector("#viewerGeneric"),
-  viewerSpecialized: document.querySelector("#viewerSpecialized"),
-  liveStage: document.querySelector("#liveStage"),
-  liveVideo: document.querySelector("#liveVideo"),
-  liveEmpty: document.querySelector("#liveEmpty"),
-  rtspForm: document.querySelector("#rtspForm"),
-  rtspUrl: document.querySelector("#rtspUrl"),
-  startStream: document.querySelector("#startStream"),
-  stopStream: document.querySelector("#stopStream"),
-  sourceText: document.querySelector("#sourceText"),
-  hlsText: document.querySelector("#hlsText"),
-  statusName: document.querySelector("#statusName"),
-  streamText: document.querySelector("#streamText"),
-  stateText: document.querySelector("#stateText"),
-  liveStatusBadge: document.querySelector("#liveStatusBadge"),
-  maskedUrlText: document.querySelector("#maskedUrlText"),
-  logText: document.querySelector("#logText"),
-  liveErrorText: document.querySelector("#liveErrorText"),
-  runtimeError: document.querySelector("#runtimeError"),
-  fileInput: document.querySelector("#videoFile"),
-  fileName: document.querySelector("#fileName"),
-  createJob: document.querySelector("#createJob"),
-  statusBadge: document.querySelector("#statusBadge"),
-  statusText: document.querySelector("#statusText"),
-  progressFill: document.querySelector("#progressFill"),
+  streamForm: document.querySelector("#streamForm"),
+  rtspInput: document.querySelector("#rtspInput"),
+  startBtn: document.querySelector("#startBtn"),
+  stopBtn: document.querySelector("#stopBtn"),
+  stage: document.querySelector("#stage"),
+  divider: document.querySelector("#divider"),
+  savingBadge: document.querySelector("#savingBadge"),
+  emptyState: document.querySelector("#emptyState"),
+  h264Video: document.querySelector("#h264Video"),
+  h265Video: document.querySelector("#h265Video"),
+  h264Resolution: document.querySelector("#h264Resolution"),
+  h265Resolution: document.querySelector("#h265Resolution"),
+  h264Bitrate: document.querySelector("#h264Bitrate"),
+  h265Bitrate: document.querySelector("#h265Bitrate"),
+  h264Crf: document.querySelector("#h264Crf"),
+  h265Crf: document.querySelector("#h265Crf"),
+  h264Latency: document.querySelector("#h264Latency"),
+  h265Latency: document.querySelector("#h265Latency"),
+  controls: document.querySelector("#controls"),
+  playBtn: document.querySelector("#playBtn"),
+  liveChip: document.querySelector("#liveChip"),
+  timeLabel: document.querySelector("#timeLabel"),
+  streamStatus: document.querySelector("#streamStatus"),
+  maskedUrl: document.querySelector("#maskedUrl"),
+  outputStatus: document.querySelector("#outputStatus"),
   errorText: document.querySelector("#errorText"),
-  resultsPanel: document.querySelector("#resultsPanel"),
-  metricGrid: document.querySelector("#metricGrid"),
-  downloadGrid: document.querySelector("#downloadGrid"),
+  runtimeError: document.querySelector("#runtimeError"),
 };
 
-const expectedPipelineVersion = "v1.4.0";
-const expectedStrategyIds = [
-  "default_x265",
-  "generic_no_roi",
-  "budget_neutral_roi",
-  "roi_denoise_experimental",
-];
-
-const statusTitles = {
-  queued: "排队中",
-  preparing_reference: "准备参考画面",
-  encoding_default: "编码默认方案",
-  searching_general: "搜索通用无 ROI 方案",
-  validating_general: "验证通用无 ROI 方案",
-  searching_roi: "搜索预算中性 ROI",
-  validating_roi: "验证 ROI 预算和重点区域",
-  searching_roi_denoise: "搜索 ROI + 降噪实验项",
-  validating_roi_denoise: "验证降噪预算和重点区域",
-  generating_previews: "生成浏览器预览",
-  completed: "已完成",
-  failed: "失败",
+const players = {
+  h264_native: null,
+  h265_optimized: null,
 };
 
-const liveStatusTitles = {
-  starting: "启动中",
-  running: "预览中",
-  failed: "失败",
-  stopped: "已停止",
-};
-
-let runtimeReady = false;
-let liveStreamId = null;
-let livePollTimer = null;
-let liveHls = null;
+let dragging = false;
+let streamId = null;
 let pollTimer = null;
-let activeResult = null;
+let latencyTimer = null;
+let heartbeatTimer = null;
+let h264PlaylistUrl = null;
+let h265PlaylistUrl = null;
+let latestPayload = null;
 
-function showTab(which) {
-  const generic = which === "generic";
-  els.viewerGeneric.hidden = !generic;
-  els.viewerSpecialized.hidden = generic;
-  els.tabs.forEach((tab) => {
-    const active = tab.dataset.target === which;
-    tab.classList.toggle("active", active);
-    tab.setAttribute("aria-selected", String(active));
+function setSplit(pct) {
+  const next = Math.max(0, Math.min(100, pct));
+  els.h265Video.style.clipPath = `inset(0 0 0 ${next}%)`;
+  els.divider.style.left = `${next}%`;
+  els.stage.style.setProperty("--p", next);
+  els.divider.setAttribute("aria-valuenow", Math.round(next));
+}
+
+function posFromEvent(clientX) {
+  const rect = els.stage.getBoundingClientRect();
+  return ((clientX - rect.left) / rect.width) * 100;
+}
+
+function setBusy(busy) {
+  els.startBtn.disabled = busy;
+  els.rtspInput.disabled = busy && Boolean(streamId);
+  els.stopBtn.disabled = !streamId;
+}
+
+function setLiveChip(status) {
+  els.liveChip.classList.remove("running", "failed");
+  if (status === "running") {
+    els.liveChip.textContent = "实时预览中";
+    els.liveChip.classList.add("running");
+  } else if (status === "failed") {
+    els.liveChip.textContent = "拉流失败";
+    els.liveChip.classList.add("failed");
+  } else if (status === "starting") {
+    els.liveChip.textContent = "启动中";
+  } else if (status === "stopped") {
+    els.liveChip.textContent = "已停止";
+  } else {
+    els.liveChip.textContent = "未连接";
+  }
+}
+
+function metricNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatBitrate(value) {
+  const number = metricNumber(value);
+  return Number.isFinite(number) ? `${number.toFixed(2)} Mbps` : "--";
+}
+
+function formatLatency(value) {
+  return Number.isFinite(value) && value >= 0 ? `${value.toFixed(1)} s` : "--";
+}
+
+function resolutionFromProbe(probe) {
+  return probe && probe.width && probe.height ? `${probe.width}x${probe.height}` : "--";
+}
+
+function output(payload, variant) {
+  return payload.outputs?.[variant] || {};
+}
+
+function probe(payload, variant) {
+  return payload.probes?.[variant] || output(payload, variant).probe || {};
+}
+
+function metrics(payload, variant) {
+  return output(payload, variant).metrics || {};
+}
+
+function outputError(payload) {
+  const errors = [];
+  for (const variant of ["h264_native", "h265_optimized"]) {
+    const item = output(payload, variant);
+    if (item.error) errors.push(`${variant}: ${item.error}`);
+    if (item.metric_error) errors.push(`${variant} metric: ${item.metric_error}`);
+  }
+  if (payload.last_error) errors.push(payload.last_error);
+  return errors[0] || "--";
+}
+
+function outputStatus(payload) {
+  const h264 = output(payload, "h264_native").status || "--";
+  const h265 = output(payload, "h265_optimized").status || "--";
+  return `H.264 ${h264} / H.265 ${h265}`;
+}
+
+function playerLatency(video, key) {
+  const player = players[key];
+  if (player && Number.isFinite(player.latency)) {
+    return player.latency;
+  }
+  const seekable = video.seekable;
+  if (!seekable || seekable.length <= 0) return null;
+  const liveEdge = seekable.end(seekable.length - 1);
+  if (!Number.isFinite(liveEdge)) return null;
+  return Math.max(0, liveEdge - video.currentTime);
+}
+
+function updateLatencyLabels() {
+  els.h264Latency.textContent = formatLatency(playerLatency(els.h264Video, "h264_native"));
+  els.h265Latency.textContent = formatLatency(playerLatency(els.h265Video, "h265_optimized"));
+}
+
+function syncPlayers() {
+  const videos = [els.h264Video, els.h265Video];
+  if (videos.some((video) => !video.seekable || video.seekable.length === 0)) return;
+  const starts = videos.map((video) => video.seekable.start(video.seekable.length - 1));
+  const edges = videos.map((video) => video.seekable.end(video.seekable.length - 1));
+  const target = Math.max(Math.max(...starts), Math.min(...edges) - 2);
+  if (!Number.isFinite(target) || target > Math.min(...edges)) return;
+  videos.forEach((video) => {
+    if (!Number.isFinite(video.currentTime) || Math.abs(video.currentTime - target) > 0.5) {
+      video.currentTime = target;
+    }
   });
 }
 
-async function fetchJson(url, options) {
-  const response = await fetch(url, options);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.detail || `请求失败：${response.status}`);
-  }
-  return data;
+function updateSaving(payload) {
+  const saving = metricNumber(payload.bandwidth_saving_pct);
+  els.savingBadge.textContent = Number.isFinite(saving) ? `${saving.toFixed(0)}%` : "--";
 }
 
-function runtimeLooksCurrent(runtime) {
-  if (!runtime || runtime.pipeline_version !== expectedPipelineVersion) return false;
-  const ids = new Set(runtime.strategy_ids || []);
-  return expectedStrategyIds.every((id) => ids.has(id));
+function attachHls(video, url, key) {
+  if (!url) return;
+  if (players[key]) {
+    players[key].destroy();
+    players[key] = null;
+  }
+  if (window.Hls && window.Hls.isSupported()) {
+    const player = new window.Hls({
+      lowLatencyMode: false,
+      liveSyncDurationCount: 2,
+      maxLiveSyncPlaybackRate: 1.25,
+      maxBufferLength: 8,
+    });
+    player.on(window.Hls.Events.ERROR, (_event, data) => {
+      if (!data || !data.fatal) return;
+      if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+        player.startLoad();
+        return;
+      }
+      if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+        player.recoverMediaError();
+        return;
+      }
+      player.destroy();
+      players[key] = null;
+    });
+    player.loadSource(url);
+    player.attachMedia(video);
+    players[key] = player;
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = url;
+  } else {
+    throw new Error("当前浏览器不支持 HLS 播放");
+  }
+}
+
+function detachPlayers() {
+  Object.keys(players).forEach((key) => {
+    if (players[key]) {
+      players[key].destroy();
+      players[key] = null;
+    }
+  });
+  h264PlaylistUrl = null;
+  h265PlaylistUrl = null;
+  latestPayload = null;
+  for (const video of [els.h264Video, els.h265Video]) {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  }
+  els.emptyState.classList.remove("hide");
+  els.stage.classList.remove("active");
+  els.controls.classList.remove("playing");
+  els.playBtn.disabled = true;
+  els.h264Bitrate.textContent = "--";
+  els.h265Bitrate.textContent = "--";
+  els.h264Latency.textContent = "--";
+  els.h265Latency.textContent = "--";
+  els.savingBadge.textContent = "--";
+}
+
+function playBoth() {
+  els.h264Video.play().catch(() => {});
+  els.h265Video.play().catch(() => {});
+  els.controls.classList.add("playing");
+}
+
+function pauseBoth() {
+  els.h264Video.pause();
+  els.h265Video.pause();
+  els.controls.classList.remove("playing");
+}
+
+function updateStatus(payload) {
+  latestPayload = payload;
+  const h264Probe = probe(payload, "h264_native");
+  const h265Probe = probe(payload, "h265_optimized");
+  const h264Metrics = metrics(payload, "h264_native");
+  const h265Metrics = metrics(payload, "h265_optimized");
+
+  els.streamStatus.textContent = payload.status || "unknown";
+  els.maskedUrl.textContent = payload.masked_url || "--";
+  els.outputStatus.textContent = outputStatus(payload);
+  els.errorText.textContent = outputError(payload);
+  els.h264Resolution.textContent = resolutionFromProbe(h264Probe);
+  els.h265Resolution.textContent = resolutionFromProbe(h265Probe);
+  els.h264Bitrate.textContent = formatBitrate(h264Metrics.native_bitrate_mbps);
+  els.h265Bitrate.textContent = formatBitrate(h265Metrics.native_bitrate_mbps);
+  els.h264Crf.textContent = h264Probe.crf_label || "原生默认";
+  els.h265Crf.textContent = h265Probe.crf_label || "36.0";
+  const dropped = metricNumber(payload.dropped_frames) || 0;
+  els.timeLabel.textContent = `等价 H.264 预览 · 原生码率统计 · 丢帧 ${dropped}`;
+  setLiveChip(payload.status);
+  updateLatencyLabels();
+  updateSaving(payload);
+
+  if (payload.h264_native_playlist_url && payload.h264_native_playlist_url !== h264PlaylistUrl) {
+    attachHls(els.h264Video, payload.h264_native_playlist_url, "h264_native");
+    h264PlaylistUrl = payload.h264_native_playlist_url;
+  }
+  if (
+    payload.h265_optimized_playlist_url &&
+    payload.h265_optimized_playlist_url !== h265PlaylistUrl
+  ) {
+    attachHls(els.h265Video, payload.h265_optimized_playlist_url, "h265_optimized");
+    h265PlaylistUrl = payload.h265_optimized_playlist_url;
+  }
+  if (h264PlaylistUrl || h265PlaylistUrl) {
+    els.emptyState.classList.add("hide");
+    els.stage.classList.add("active");
+  }
+  if (h264PlaylistUrl && h265PlaylistUrl) {
+    els.playBtn.disabled = false;
+    playBoth();
+  }
+  if (payload.status === "failed" || payload.status === "stopped") {
+    stopPolling();
+    setBusy(false);
+  }
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
+  if (!response.ok) {
+    throw new Error(payload.detail || `请求失败：${response.status}`);
+  }
+  return payload;
+}
+
+function startPolling() {
+  stopPolling();
+  pollTimer = window.setInterval(async () => {
+    if (!streamId) return;
+    try {
+      updateStatus(await fetchJson(`/api/streams/${streamId}`, { cache: "no-store" }));
+    } catch (error) {
+      els.errorText.textContent = error.message;
+      setLiveChip("failed");
+    }
+  }, 1200);
+  latencyTimer = window.setInterval(() => {
+    syncPlayers();
+    updateLatencyLabels();
+    if (latestPayload) updateSaving(latestPayload);
+  }, 500);
+  heartbeatTimer = window.setInterval(async () => {
+    if (!streamId) return;
+    try {
+      await fetchJson(`/api/streams/${streamId}/heartbeat`, {
+        method: "POST",
+        cache: "no-store",
+      });
+    } catch (error) {
+      els.errorText.textContent = error.message;
+    }
+  }, 2000);
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    window.clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  if (latencyTimer) {
+    window.clearInterval(latencyTimer);
+    latencyTimer = null;
+  }
+  if (heartbeatTimer) {
+    window.clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
 }
 
 async function checkRuntime() {
   try {
-    const runtime = await fetchJson("/api/runtime");
-    if (!runtimeLooksCurrent(runtime)) {
-      els.createJob.disabled = true;
-      els.runtimeError.hidden = false;
-      els.runtimeError.textContent =
-        `后端仍是 ${runtime.pipeline_version || "旧版"}，请关闭当前服务后重新运行 start_web.cmd。`;
-      return false;
+    const runtime = await fetchJson("/api/runtime", { cache: "no-store" });
+    const variants = runtime.live_preview?.variants || [];
+    if (
+      runtime.pipeline_version !== "v1.6.0" ||
+      runtime.live_preview?.frontend !== "apps/web" ||
+      runtime.live_preview?.preview_codec !== "h264" ||
+      !variants.includes("h264_native") ||
+      !variants.includes("h265_optimized")
+    ) {
+      throw new Error("当前后端不是 V1.6 实时双路编码入口");
     }
-    if (!runtime.live_preview || runtime.live_preview.enabled !== true) {
-      els.runtimeError.hidden = false;
-      els.runtimeError.textContent = "当前后端未启用实时预览接口。";
-      return false;
-    }
-    runtimeReady = true;
-    els.createJob.disabled = false;
     els.runtimeError.hidden = true;
     els.runtimeError.textContent = "";
     return true;
   } catch (error) {
-    els.createJob.disabled = true;
     els.runtimeError.hidden = false;
-    els.runtimeError.textContent = "后端服务还没启动或没有重启，请运行 start_web.cmd。";
+    els.runtimeError.textContent = error.message || "后端服务还没启动";
     return false;
   }
 }
 
-function setLiveStatus(payload = {}) {
-  const status = payload.status || "idle";
-  const title = liveStatusTitles[status] || "未启动";
-  const streamLabel = payload.stream_id ? payload.stream_id.slice(0, 8) : "--";
-  const maskedUrl = payload.masked_url || "--";
-  const playlistReady = Boolean(payload.playlist_url);
-  const lastLog = payload.log_tail && payload.log_tail.length
-    ? payload.log_tail[payload.log_tail.length - 1]
-    : "--";
-
-  els.statusName.textContent = title;
-  els.liveStatusBadge.textContent = title;
-  els.streamText.textContent = streamLabel;
-  els.stateText.textContent = status;
-  els.sourceText.textContent = maskedUrl;
-  els.maskedUrlText.textContent = maskedUrl;
-  els.hlsText.textContent = playlistReady ? "已生成" : "未生成";
-  els.logText.textContent = lastLog;
-
-  if (payload.error) {
-    els.liveErrorText.hidden = false;
-    els.liveErrorText.textContent = payload.error;
-  } else {
-    els.liveErrorText.hidden = true;
-    els.liveErrorText.textContent = "";
-  }
-
-  els.stopStream.disabled = !payload.stream_id || status === "stopped" || status === "failed";
-}
-
-function clearLivePlayer() {
-  if (liveHls) {
-    liveHls.destroy();
-    liveHls = null;
-  }
-  delete els.liveVideo.dataset.playlist;
-  els.liveVideo.pause();
-  els.liveVideo.removeAttribute("src");
-  els.liveVideo.load();
-  els.liveEmpty.classList.remove("hide");
-  els.hlsText.textContent = "未生成";
-}
-
-function attachLivePlayer(playlistUrl) {
-  if (!playlistUrl || els.liveVideo.dataset.playlist === playlistUrl) return;
-  clearLivePlayer();
-  els.liveEmpty.classList.add("hide");
-  els.liveVideo.dataset.playlist = playlistUrl;
-  if (window.Hls && window.Hls.isSupported()) {
-    liveHls = new window.Hls({
-      liveSyncDurationCount: 3,
-      maxLiveSyncPlaybackRate: 1.5,
-    });
-    liveHls.loadSource(playlistUrl);
-    liveHls.attachMedia(els.liveVideo);
-    liveHls.on(window.Hls.Events.MANIFEST_PARSED, () => {
-      els.liveVideo.play().catch(() => {});
-    });
-  } else if (els.liveVideo.canPlayType("application/vnd.apple.mpegurl")) {
-    els.liveVideo.src = playlistUrl;
-    els.liveVideo.play().catch(() => {});
-  } else {
-    els.liveErrorText.hidden = false;
-    els.liveErrorText.textContent = "当前浏览器缺少 HLS 播放能力，请确认 hls.js 已加载。";
-  }
-}
-
-async function pollLiveStream() {
-  if (!liveStreamId) return;
-  try {
-    const payload = await fetchJson(`/api/streams/${liveStreamId}`);
-    setLiveStatus(payload);
-    if (payload.playlist_url && payload.status === "running") {
-      attachLivePlayer(payload.playlist_url);
-    }
-    if (payload.status === "failed" || payload.status === "stopped") {
-      if (livePollTimer) clearInterval(livePollTimer);
-      livePollTimer = null;
-      if (payload.status === "stopped") clearLivePlayer();
-    }
-  } catch (error) {
-    els.liveErrorText.hidden = false;
-    els.liveErrorText.textContent = error.message;
-    if (livePollTimer) clearInterval(livePollTimer);
-    livePollTimer = null;
-  }
-}
-
-async function startLiveStream() {
-  if (!runtimeReady && !(await checkRuntime())) return;
-  const rtspUrl = els.rtspUrl.value.trim();
-  if (!rtspUrl) {
-    els.liveErrorText.hidden = false;
-    els.liveErrorText.textContent = "请先输入 RTSP 地址。";
-    return;
-  }
-
-  els.startStream.disabled = true;
-  clearLivePlayer();
-  setLiveStatus({ status: "starting" });
+async function startStream(rtspUrl) {
+  if (!(await checkRuntime())) return;
+  detachPlayers();
+  setBusy(true);
+  setLiveChip("starting");
+  els.streamStatus.textContent = "starting";
+  els.maskedUrl.textContent = "--";
+  els.outputStatus.textContent = "--";
+  els.errorText.textContent = "--";
   try {
     const payload = await fetchJson("/api/streams", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rtsp_url: rtspUrl }),
     });
-    liveStreamId = payload.stream_id;
-    setLiveStatus(payload);
-    if (livePollTimer) clearInterval(livePollTimer);
-    livePollTimer = setInterval(pollLiveStream, 1000);
-    await pollLiveStream();
+    streamId = payload.stream_id;
+    setBusy(false);
+    updateStatus(payload);
+    startPolling();
   } catch (error) {
-    liveStreamId = null;
-    setLiveStatus();
-    els.liveErrorText.hidden = false;
-    els.liveErrorText.textContent = error.message;
+    streamId = null;
+    els.errorText.textContent = error.message;
+    setLiveChip("failed");
+    setBusy(false);
+  }
+}
+
+async function stopStream() {
+  if (!streamId) return;
+  const id = streamId;
+  stopPolling();
+  streamId = null;
+  setBusy(false);
+  try {
+    updateStatus(await fetchJson(`/api/streams/${id}`, { method: "DELETE" }));
+  } catch (error) {
+    els.errorText.textContent = error.message;
+    setLiveChip("failed");
   } finally {
-    els.startStream.disabled = false;
+    detachPlayers();
+    els.rtspInput.disabled = false;
   }
 }
 
-async function stopLiveStream() {
-  if (!liveStreamId) return;
-  els.stopStream.disabled = true;
-  try {
-    const payload = await fetchJson(`/api/streams/${liveStreamId}`, {
-      method: "DELETE",
-    });
-    setLiveStatus(payload);
-    if (livePollTimer) clearInterval(livePollTimer);
-    livePollTimer = null;
-    clearLivePlayer();
-  } catch (error) {
-    els.liveErrorText.hidden = false;
-    els.liveErrorText.textContent = error.message;
-  }
-}
-
-function setStatus(job) {
-  const title = job.stage_title || statusTitles[job.status] || job.status;
-  els.statusBadge.textContent = title;
-  els.statusText.textContent = job.job_id
-    ? `任务 ${job.job_id.slice(0, 8)} 正在处理。`
-    : "选择一个本地视频后创建任务。";
-  els.progressFill.style.width = `${job.progress || 0}%`;
-  if (job.status === "failed" && job.error) {
-    els.errorText.hidden = false;
-    els.errorText.textContent = job.error;
-  } else {
-    els.errorText.hidden = true;
-    els.errorText.textContent = "";
-  }
-}
-
-function setPlainStatus(text) {
-  els.statusBadge.textContent = "提示";
-  els.statusText.textContent = text;
-  els.progressFill.style.width = "0%";
-}
-
-function resultLooksCurrent(result) {
-  if (!result || result.pipeline_version !== expectedPipelineVersion) return false;
-  const ids = new Set((result.strategies || []).map((strategy) => strategy.strategy_id));
-  return expectedStrategyIds.every((id) => ids.has(id));
-}
-
-function formatBitrate(value) {
-  if (value === null || value === undefined) return "--";
-  return `${(value / 1_000_000).toFixed(6)} Mbit/s`;
-}
-
-function formatSaving(value) {
-  if (value === null || value === undefined) return "基准";
-  const fixed = `${value.toFixed(2)}%`;
-  if (value > 0) return `${fixed} 码率节省`;
-  if (value < 0) return `${fixed} 码率增加`;
-  return "0.00% 持平";
-}
-
-function formatNumber(value, digits = 3, suffix = "") {
-  if (value === null || value === undefined) return "--";
-  return `${value.toFixed(digits)}${suffix}`;
-}
-
-function savingClass(value) {
-  if (value > 0) return "saving-positive";
-  if (value < 0) return "saving-negative";
-  return "";
-}
-
-function renderMetrics() {
-  els.metricGrid.innerHTML = "";
-  activeResult.strategies.forEach((strategy) => {
-    const card = document.createElement("article");
-    card.className = "metric-card";
-    card.innerHTML = `
-      <h3>${strategy.title}</h3>
-      <div class="metric-list">
-        <div>状态：<span>${strategy.status === "completed" ? "已生成" : "失败"}</span></div>
-        <div>分辨率：<span>${strategy.resolution || "--"}</span></div>
-        <div>码率：<span>${formatBitrate(strategy.average_video_packet_bitrate_bps)}</span></div>
-        <div>CRF：<span>${formatNumber(strategy.selected_crf, 1)}</span></div>
-        <div>VMAF / P5：<span>${formatNumber(strategy.vmaf_mean)} / ${formatNumber(strategy.vmaf_p5)}</span></div>
-        <div>相对默认：<span class="${savingClass(strategy.saving_vs_default_pct)}">${formatSaving(strategy.saving_vs_default_pct)}</span></div>
-      </div>
-    `;
-    els.metricGrid.appendChild(card);
-  });
-}
-
-function renderDownloads() {
-  els.downloadGrid.innerHTML = "";
-  activeResult.strategies.forEach((strategy) => {
-    const card = document.createElement("article");
-    card.className = "download-card";
-    const href = strategy.download_url || "";
-    card.innerHTML = `
-      <h3>${strategy.title}</h3>
-      <a href="${href}" ${href ? "" : 'aria-disabled="true"'}>${href ? "下载 H.265 输出" : "未生成文件"}</a>
-    `;
-    els.downloadGrid.appendChild(card);
-  });
-}
-
-function renderResult() {
-  if (!activeResult) return;
-  els.resultsPanel.hidden = false;
-  renderMetrics();
-  renderDownloads();
-}
-
-async function pollJob(jobId) {
-  try {
-    const job = await fetchJson(`/api/jobs/${jobId}`);
-    setStatus(job);
-    if (job.status === "completed") {
-      clearInterval(pollTimer);
-      pollTimer = null;
-      activeResult = await fetchJson(`/api/jobs/${jobId}/results`);
-      if (!resultLooksCurrent(activeResult)) {
-        localStorage.removeItem("hevc_lab_last_job");
-        activeResult = null;
-        els.resultsPanel.hidden = true;
-        setPlainStatus("检测到上一次任务是旧版结果，已清除；请重新创建 V1.4 任务。");
-        return;
-      }
-      renderResult();
-    }
-    if (job.status === "failed") {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
-  } catch (error) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-    setPlainStatus(error.message);
-  }
-}
-
-async function createJob() {
-  if (!runtimeReady && !(await checkRuntime())) return;
-  const file = els.fileInput.files[0];
-  if (!file) {
-    setPlainStatus("请先选择一个 MP4 或 MKV 视频。");
-    return;
-  }
-  els.createJob.disabled = true;
-  els.resultsPanel.hidden = true;
-  activeResult = null;
-  try {
-    const body = new FormData();
-    body.append("file", file);
-    const job = await fetchJson("/api/jobs", {
-      method: "POST",
-      body,
-    });
-    localStorage.setItem("hevc_lab_last_job", job.job_id);
-    setStatus(job);
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(() => pollJob(job.job_id), 1000);
-    await pollJob(job.job_id);
-  } catch (error) {
-    setPlainStatus(error.message);
-  } finally {
-    els.createJob.disabled = false;
-  }
-}
-
-els.tabs.forEach((tab) => tab.addEventListener("click", () => showTab(tab.dataset.target)));
-els.rtspForm.addEventListener("submit", (event) => {
+els.divider.addEventListener("mousedown", (event) => {
+  dragging = true;
   event.preventDefault();
-  startLiveStream();
 });
-els.stopStream.addEventListener("click", stopLiveStream);
-els.fileInput.addEventListener("change", () => {
-  const file = els.fileInput.files[0];
-  els.fileName.textContent = file ? file.name : "选择 MP4 / MKV 视频";
+window.addEventListener("mousemove", (event) => {
+  if (dragging) setSplit(posFromEvent(event.clientX));
 });
-els.createJob.addEventListener("click", createJob);
-
-async function initApp() {
-  setLiveStatus();
-  const ready = await checkRuntime();
-  if (!ready) return;
-  const lastJobId = localStorage.getItem("hevc_lab_last_job");
-  if (lastJobId) {
-    pollJob(lastJobId);
+window.addEventListener("mouseup", () => {
+  dragging = false;
+});
+els.divider.addEventListener("touchstart", () => {
+  dragging = true;
+}, { passive: true });
+els.divider.addEventListener("touchmove", (event) => {
+  if (dragging) setSplit(posFromEvent(event.touches[0].clientX));
+}, { passive: true });
+window.addEventListener("touchend", () => {
+  dragging = false;
+});
+els.divider.addEventListener("keydown", (event) => {
+  const current = Number.parseFloat(els.divider.style.left) || 50;
+  if (event.key === "ArrowLeft") {
+    setSplit(current - 2);
+    event.preventDefault();
   }
-}
+  if (event.key === "ArrowRight") {
+    setSplit(current + 2);
+    event.preventDefault();
+  }
+});
+els.streamForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const rtspUrl = els.rtspInput.value.trim();
+  if (rtspUrl) startStream(rtspUrl);
+});
+els.stopBtn.addEventListener("click", stopStream);
+els.playBtn.addEventListener("click", () => {
+  if (els.h264Video.paused && els.h265Video.paused) playBoth();
+  else pauseBoth();
+});
+els.h264Video.addEventListener("pause", () => {
+  if (!els.h265Video.paused) pauseBoth();
+});
+els.h264Video.addEventListener("play", () => {
+  els.controls.classList.add("playing");
+});
+window.addEventListener("pagehide", () => {
+  if (!streamId) return;
+  const id = streamId;
+  streamId = null;
+  stopPolling();
+  navigator.sendBeacon(`/api/streams/${id}/stop`, new Blob([], { type: "text/plain" }));
+});
 
-initApp();
+setSplit(Number.parseFloat(new URLSearchParams(location.search).get("p")) || 50);
+setLiveChip("idle");
+checkRuntime();

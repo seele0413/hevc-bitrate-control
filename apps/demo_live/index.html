@@ -3,21 +3,21 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>H.264 vs H.265 实时对比 · H.265 Lab</title>
+    <title>H.264 vs H.265 固定参数实时对比 · V1.6</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="card">
       <header>
-        <h1>H.264 原生 vs H.265 保守策略</h1>
+        <h1>H.264 原生 vs H.265 固定参数</h1>
         <p class="subtitle">摄像头侧两路编码流实时对比 · 本地 FFmpeg 仅转 HLS 预览</p>
       </header>
 
       <nav class="strategy-tabs" role="tablist" aria-label="方案类型">
         <button class="strategy-tab active" type="button" data-target="generic" role="tab" aria-selected="true">
           <span class="tab-title">通用</span>
-          <span class="tab-desc">原生 H.264 与 H.265 保守策略</span>
+          <span class="tab-desc">原生 H.264 与 H.265 固定参数方案</span>
         </button>
         <button class="strategy-tab" type="button" data-target="specialized" role="tab" aria-selected="false">
           <span class="tab-title">专用</span>
@@ -45,8 +45,8 @@
             inputmode="url"
             autocomplete="off"
             spellcheck="false"
-            placeholder="H.265 保守策略 RTSP 地址"
-            aria-label="H.265 保守策略 RTSP 地址"
+            placeholder="H.265 固定参数 RTSP 地址"
+            aria-label="H.265 固定参数 RTSP 地址"
             required
           />
           <button class="primary-btn" id="startBtn" type="submit">启动预览</button>
@@ -67,8 +67,8 @@
           </div>
 
           <div class="label ours">
-            <div class="name">H.265 保守策略</div>
-            <div>Mode: <span>conservative</span></div>
+            <div class="name">H.265 固定参数</div>
+            <div>Mode: <span>V1.6 fixed</span></div>
             <div>Codec: <span id="conservativeCodec">--</span></div>
             <div>Preview: <span id="conservativePreviewMode">H.264 HLS</span></div>
             <div>Bitrate: <span class="hl" id="conservativeBitrate">--</span></div>

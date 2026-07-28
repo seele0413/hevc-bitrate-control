@@ -148,58 +148,61 @@ class InterConfigTests(unittest.TestCase):
         self.assertIn("keyint=400", aggressive_plus_plus_plus_params)
         self.assertIn("min-keyint=40", aggressive_plus_plus_plus_params)
 
-    def test_v1_4_multi_encode_outputs_budget_neutral_roi_plan(self):
+    def test_v1_6_multi_encode_outputs_h264_native_and_fixed_hevc_plan(self):
         self.assertEqual(
             multi_encode_modes(),
             (
-                "general",
-                "roi",
-                "roi_denoise",
+                "h264_native",
+                "hevc_fixed",
             ),
         )
         strategies = multi_encode_strategies()
         self.assertEqual(
             [item.strategy_id for item in strategies],
             [
-                "generic_no_roi",
-                "budget_neutral_roi",
-                "roi_denoise_experimental",
+                "hevc_fixed",
             ],
         )
         self.assertEqual(
             [item.source_mode for item in strategies],
-            ["aggressive", "aggressive", "aggressive"],
+            ["aggressive"],
         )
         self.assertEqual(
             [item.effective_preset for item in strategies],
-            ["medium", "medium", "medium"],
+            ["medium"],
         )
         self.assertEqual(
             [item.crf_search_max for item in strategies],
-            [38.0, 38.0, 38.0],
+            [36.0],
         )
         self.assertEqual(
             [
-                (item.target_vmaf, item.target_vmaf_p5, item.target_ssim)
+                (
+                    item.target_vmaf,
+                    item.target_vmaf_p5,
+                    item.target_ssim,
+                    item.crf_search_min,
+                    item.crf_search_max,
+                )
                 for item in strategies
             ],
-            [(83.0, 80.0, 0.950)] * 3,
+            [(83.0, 80.0, 0.950, 36.0, 36.0)],
         )
         self.assertEqual(
             [(item.roi_enabled, item.denoise_enabled) for item in strategies],
-            [(False, False), (True, False), (True, True)],
+            [(False, False)],
         )
         self.assertEqual(
             [item.budget_neutral_required for item in strategies],
-            [False, True, True],
+            [False],
         )
         self.assertEqual(
             [item.roi_quality_required for item in strategies],
-            [False, True, True],
+            [False],
         )
         self.assertEqual(
             [item.budget_reference for item in strategies],
-            [None, "generic_no_roi", "generic_no_roi"],
+            [None],
         )
 
     def test_modes_share_baseline_params_but_use_their_declared_preset(self):

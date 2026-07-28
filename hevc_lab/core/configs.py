@@ -23,10 +23,9 @@ MODE_NAMES: Tuple[str, ...] = (
     "aggressive_plus_plus_plus",
 )
 
-MULTI_ENCODE_MODE_NAMES: Tuple[str, str, str] = (
-    "general",
-    "roi",
-    "roi_denoise",
+MULTI_ENCODE_MODE_NAMES: Tuple[str, str] = (
+    "h264_native",
+    "hevc_fixed",
 )
 
 
@@ -34,73 +33,32 @@ def available_modes() -> Tuple[str, ...]:
     return MODE_NAMES
 
 
-def multi_encode_modes() -> Tuple[str, str, str]:
+def multi_encode_modes() -> Tuple[str, str]:
     return MULTI_ENCODE_MODE_NAMES
 
 
 def multi_encode_strategies() -> Tuple[MultiEncodeStrategy, ...]:
-    """返回 V1.4 正式四路中的三个非默认公开策略。"""
+    """返回 V1.6 正式入口中的固定 H.265 参数方案。"""
     return (
         MultiEncodeStrategy(
-            public_mode="general",
-            strategy_id="generic_no_roi",
-            title="通用无 ROI 方案",
+            public_mode="hevc_fixed",
+            strategy_id="hevc_fixed",
+            title="H.265 固定参数方案",
             description=(
-                "预算基准方案：基于 V1.0 原激进帧间结构，"
-                "使用 medium preset，不使用静态 ROI QP 或 ROI 分区降噪。"
+                "CRF 36.0、preset medium、GOP 10s、ref 6、b-frames 8、"
+                "lookahead 90；无 ROI、无降噪。"
             ),
             source_mode="aggressive",
-            strategy_generation="v1.4_general_no_roi_budget",
+            strategy_generation="v1.6_fixed_hevc_no_roi_no_denoise",
             effective_preset="medium",
             roi_enabled=False,
             denoise_enabled=False,
             target_vmaf=83.0,
             target_vmaf_p5=80.0,
             target_ssim=0.950,
-            crf_search_max=38.0,
-        ),
-        MultiEncodeStrategy(
-            public_mode="roi",
-            strategy_id="budget_neutral_roi",
-            title="预算中性 ROI 方案",
-            description=(
-                "在通用无 ROI 方案的平均视频包码率预算内，"
-                "仅使用静态 ROI QP 重新分配码率。"
-            ),
-            source_mode="aggressive",
-            strategy_generation="v1.4_budget_neutral_roi",
-            effective_preset="medium",
-            roi_enabled=True,
-            denoise_enabled=False,
-            target_vmaf=83.0,
-            target_vmaf_p5=80.0,
-            target_ssim=0.950,
-            crf_search_max=38.0,
-            budget_reference="generic_no_roi",
-            budget_neutral_required=True,
-            roi_quality_required=True,
-        ),
-        MultiEncodeStrategy(
-            public_mode="roi_denoise",
-            strategy_id="roi_denoise_experimental",
-            title="ROI + 降噪实验项",
-            description=(
-                "在通用无 ROI 方案的平均视频包码率预算内，"
-                "叠加静态 ROI QP 与 ROI 保护分区降噪。"
-            ),
-            source_mode="aggressive",
-            strategy_generation="v1.4_roi_denoise_experimental",
-            effective_preset="medium",
-            roi_enabled=True,
-            denoise_enabled=True,
-            target_vmaf=83.0,
-            target_vmaf_p5=80.0,
-            target_ssim=0.950,
-            crf_search_max=38.0,
-            budget_reference="generic_no_roi",
-            budget_neutral_required=True,
-            roi_quality_required=True,
-            experimental=True,
+            crf_search_min=36.0,
+            crf_search_max=36.0,
+            crf_search_step=0.5,
         ),
     )
 

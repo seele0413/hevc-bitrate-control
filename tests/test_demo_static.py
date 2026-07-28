@@ -5,7 +5,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEMO_ROOT = PROJECT_ROOT / "apps" / "demo"
-DEMO_LIVE_ROOT = PROJECT_ROOT / "apps" / "demo_live"
+DEMO_LIVE_ROOT = PROJECT_ROOT / "apps" / "web"
 PRIVATE_RTSP_HOST = ".".join(["36", "212", "37", "229"])
 
 
@@ -24,7 +24,10 @@ class StaticDemoTests(unittest.TestCase):
 
     def test_results_json_references_existing_static_assets(self):
         data = self.load_data()
-        self.assertEqual(data["baseline"]["id"], "default_x265")
+        self.assertEqual(data["baseline"]["id"], "default_h264")
+        self.assertEqual(data["ours"]["id"], "hevc_fixed")
+        self.assertIn("CRF 36.0", data["ours"]["params"])
+        self.assertIn("无roi", data["ours"]["params"])
         self.assertIn("previewSrc", data["baseline"])
         self.assertIn("previewSrc", data["ours"])
         for section in ("baseline", "ours"):
@@ -46,25 +49,28 @@ class LiveDemoTests(unittest.TestCase):
     def test_live_demo_uses_stream_api_and_hls(self):
         index = (DEMO_LIVE_ROOT / "index.html").read_text(encoding="utf-8")
         script = (DEMO_LIVE_ROOT / "app.js").read_text(encoding="utf-8")
-        self.assertIn("./vendor/hls.min.js", index)
-        self.assertIn('id="sourceRtspInput"', index)
-        self.assertIn('id="conservativeRtspInput"', index)
-        self.assertIn('id="sourceVideo"', index)
-        self.assertIn('id="conservativeVideo"', index)
+        self.assertIn("/vendor/hls.min.js", index)
+        self.assertIn('id="rtspInput"', index)
+        self.assertIn('id="h264Video"', index)
+        self.assertIn('id="h265Video"', index)
         self.assertIn('id="divider"', index)
-        self.assertIn('id="sourceBitrate"', index)
-        self.assertIn('id="sourceLatency"', index)
-        self.assertIn('id="conservativeBitrate"', index)
-        self.assertIn('id="conservativeLatency"', index)
-        self.assertIn("H.264 原生 vs H.265 保守策略", index)
-        self.assertIn("带宽节省", index)
+        self.assertIn('id="h264Bitrate"', index)
+        self.assertIn('id="h264Latency"', index)
+        self.assertIn('id="h265Bitrate"', index)
+        self.assertIn('id="h265Latency"', index)
+        self.assertIn("H.264 原生参数编码", index)
+        self.assertIn("H265编码参数优化", index)
+        self.assertIn("码率差", index)
         self.assertIn("/api/streams", script)
-        self.assertIn("source_rtsp_url", script)
-        self.assertIn("conservative_rtsp_url", script)
-        self.assertIn("source_playlist_url", script)
-        self.assertIn("conservative_playlist_url", script)
-        self.assertIn("camera_bitrate_mbps", script)
+        self.assertIn("rtsp_url", script)
+        self.assertNotIn("conservative_rtsp_url", script)
+        self.assertIn("h264_native_playlist_url", script)
+        self.assertIn("h265_optimized_playlist_url", script)
+        self.assertIn("native_bitrate_mbps", script)
         self.assertIn("bandwidth_saving_pct", script)
+        self.assertIn("/heartbeat", script)
+        self.assertIn("sendBeacon", script)
+        self.assertIn('preview_codec !== "h264"', script)
         self.assertIn("recoverMediaError", script)
         self.assertIn("startLoad", script)
         self.assertTrue((DEMO_LIVE_ROOT / "vendor" / "hls.min.js").exists())

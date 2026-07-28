@@ -22,15 +22,16 @@ from .core.models import (
 )
 from .core.roi import load_roi_settings
 from .core.search import QualityThresholds
-from .encoders import encode_default_x265
+from .encoders import encode_default_h264, encode_default_x265
 from .quality_search import evaluate_scheme_crf, run_scheme_quality_search
 from .reports import write_multi_encode_reports
 from .roi_study import evaluate_important_regions
 from .core.roi import important_regions
 
 
-MULTI_ENCODE_SCHEMA_VERSION = 5
-MULTI_ENCODE_PIPELINE_VERSION = "v1.4.0"
+MULTI_ENCODE_SCHEMA_VERSION = 6
+MULTI_ENCODE_PIPELINE_VERSION = "v1.6.0"
+V1_6_HEVC_FIXED_CRF = 36.0
 SHORT_SEARCH_SECONDS = 12.0
 CRF_MIN = 18.0
 CRF_STEP = 0.5
@@ -410,6 +411,29 @@ def _default_cache_key(reference: ReferenceArtifact, toolchain: Toolchain) -> st
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _native_h264_cache_key(reference: ReferenceArtifact, toolchain: Toolchain) -> str:
+    executable = toolchain.ffmpeg.resolve()
+    stat = executable.stat()
+    basis = {
+        "schema_version": MULTI_ENCODE_SCHEMA_VERSION,
+        "pipeline_version": MULTI_ENCODE_PIPELINE_VERSION,
+        "input_sha256": reference.input_sha256,
+        "reference_cache_key": reference.cache_key,
+        "encoder": "libx264",
+        "custom_crf": None,
+        "custom_preset": None,
+        "custom_x264_params": None,
+        "custom_filters": None,
+        "ffmpeg": {
+            "path": str(executable),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        },
+    }
+    serialized = json.dumps(basis, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _default_strategy(
     toolchain: Toolchain,
     reference: ReferenceArtifact,
@@ -508,6 +532,104 @@ def _default_strategy(
     return payload
 
 
+def _h264_native_strategy(
+    toolchain: Toolchain,
+    reference: ReferenceArtifact,
+    output_dir: Path,
+) -> dict:
+    destination = (output_dir / "default_h264.mp4").resolve()
+    cache_dir = output_dir / "work" / "h264_native"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = cache_dir / "default_h264.json"
+    log_path = cache_dir / "encode.log"
+    cache_key = _native_h264_cache_key(reference, toolchain)
+    cache_hit = False
+    timing = {"elapsed": 0.0, "speed": 0.0}
+    if manifest_path.is_file() and destination.is_file():
+        try:
+            stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (
+                stored.get("cache_key") == cache_key
+                and destination.stat().st_size
+                == int(stored["output"]["file_size_bytes"])
+            ):
+                timing = stored["timing"]
+                cache_hit = True
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            cache_hit = False
+    if not cache_hit:
+        print("[h264_native] 正在使用 libx264 原生默认参数编码完整视频……", flush=True)
+        timing = encode_default_h264(
+            toolchain=toolchain,
+            source=reference.video,
+            destination=destination,
+            log_path=log_path,
+        )
+    output = probe_video(toolchain.ffprobe, destination)
+    payload = {
+        "strategy_id": "default_h264",
+        "title": "H.264 原生编码",
+        "mode": "h264_native",
+        "public_mode": "h264_native",
+        "source_mode": "h264_native_default",
+        "strategy_generation": "v1.6_h264_native_default",
+        "region_processing_enabled": False,
+        "roi_enabled": False,
+        "denoise_enabled": False,
+        "effective_preset": None,
+        "crf_search_max": None,
+        "budget_reference_strategy_id": None,
+        "budget_neutral_required": False,
+        "roi_quality_required": False,
+        "experimental": False,
+        "status": "completed",
+        "output_path": str(destination),
+        "width": output.width,
+        "height": output.height,
+        "resolution": f"{output.width}x{output.height}",
+        "average_video_packet_bitrate_bps": output.video_bitrate_bps,
+        "average_video_packet_bitrate_mbps": output.video_bitrate_bps / 1_000_000.0,
+        "saving_vs_default_pct": None,
+        "saving_vs_general_no_roi_pct": None,
+        "budget_bitrate_bps": None,
+        "budget_bitrate_mbps": None,
+        "budget_neutral_pass": None,
+        "budget_margin_bps": None,
+        "roi_quality_preserved": None,
+        "roi_quality_improved": None,
+        "roi_region_quality": [],
+        "target_saving_min_pct": None,
+        "target_saving_max_pct": None,
+        "target_saving_met": None,
+        "saving_target_status": "not_applicable",
+        "selection_reason": "h264_native_reference",
+        "cache_hit": cache_hit,
+        "timing": timing,
+        "encoder": {
+            "name": "libx264",
+            "custom_crf": None,
+            "custom_preset": None,
+            "custom_x264_params": None,
+            "custom_filters": None,
+            "description": "只指定 libx264，使用 FFmpeg/libx264 原生默认参数",
+        },
+    }
+    _atomic_json(
+        manifest_path,
+        {
+            "schema_version": MULTI_ENCODE_SCHEMA_VERSION,
+            "cache_key": cache_key,
+            "timing": timing,
+            "output": {
+                "path": str(destination),
+                "file_size_bytes": output.file_size_bytes,
+                "video": output.to_dict(),
+            },
+        },
+    )
+    return payload
+
+
 def _publish_candidate(candidate: CandidateResult, destination: Path) -> bool:
     source = Path(candidate.output_path).resolve()
     if destination.is_file():
@@ -579,6 +701,112 @@ def _failed_strategy_from_exception(
         "config": v1_comparison_plan(strategy.source_mode).optimized.to_dict(fps),
         "conditions": None,
         "adaptive_quantization": default_aq_profile().to_dict(),
+        "roi": None,
+        "denoise": None,
+    }
+
+
+def _fixed_hevc_strategy(
+    toolchain: Toolchain,
+    input_source,
+    full_reference: ReferenceArtifact,
+    output_dir: Path,
+    default_bitrate_bps: float,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> dict:
+    strategy = multi_encode_strategies()[0]
+    plan = v1_comparison_plan(strategy.source_mode)
+    scheme = plan.optimized
+    conditions = replace(
+        plan.conditions,
+        preset=strategy.effective_preset,
+        preset_source="v1.6_fixed_strategy",
+        mode_default_preset=plan.conditions.mode_default_preset
+        or plan.conditions.preset,
+    )
+    thresholds = QualityThresholds(
+        vmaf_mean=strategy.target_vmaf,
+        vmaf_p5=strategy.target_vmaf_p5,
+        ssim=strategy.target_ssim,
+    )
+    aq = default_aq_profile()
+    _notify_progress(progress_callback, "encoding_hevc_fixed")
+    print("[hevc_fixed] 正在按 V1.6 固定参数编码完整视频……", flush=True)
+    candidate = evaluate_scheme_crf(
+        toolchain=toolchain,
+        input_source=input_source,
+        reference=full_reference,
+        output_dir=output_dir / "work" / "hevc_fixed",
+        scheme=scheme,
+        conditions=conditions,
+        thresholds=thresholds,
+        min_speed_x=None,
+        crf=V1_6_HEVC_FIXED_CRF,
+        adaptive_quantization=aq,
+        roi_settings=None,
+        denoise_settings=None,
+    )
+    destination = (output_dir / strategy.output_filename).resolve()
+    publish_cache_hit = _publish_candidate(candidate, destination)
+    output = probe_video(toolchain.ffprobe, destination)
+    saving_vs_default = bitrate_saving_vs_default_pct(
+        default_bitrate_bps,
+        output.video_bitrate_bps,
+    )
+    return {
+        "strategy_id": strategy.strategy_id,
+        "title": strategy.title,
+        "mode": strategy.public_mode,
+        "public_mode": strategy.public_mode,
+        "source_mode": strategy.source_mode,
+        "strategy_generation": strategy.strategy_generation,
+        "region_processing_enabled": False,
+        "roi_enabled": False,
+        "denoise_enabled": False,
+        "effective_preset": conditions.preset,
+        "crf_search_max": strategy.crf_search_max,
+        "budget_reference_strategy_id": None,
+        "budget_neutral_required": False,
+        "roi_quality_required": False,
+        "experimental": False,
+        "strategy": strategy.to_dict(),
+        "status": "completed",
+        "failure_reason": None,
+        "output_path": str(destination),
+        "width": output.width,
+        "height": output.height,
+        "resolution": f"{output.width}x{output.height}",
+        "average_video_packet_bitrate_bps": output.video_bitrate_bps,
+        "average_video_packet_bitrate_mbps": output.video_bitrate_bps / 1_000_000.0,
+        "saving_vs_default_pct": saving_vs_default,
+        "saving_vs_general_no_roi_pct": None,
+        "budget_bitrate_bps": None,
+        "budget_bitrate_mbps": None,
+        "budget_neutral_pass": None,
+        "budget_margin_bps": None,
+        "roi_quality_preserved": None,
+        "roi_quality_improved": None,
+        "roi_region_quality": [],
+        "target_saving_min_pct": None,
+        "target_saving_max_pct": None,
+        "target_saving_met": None,
+        "saving_target_status": "not_applicable",
+        "selection_reason": "v1.6_fixed_crf_no_search",
+        "cache_hit": bool(publish_cache_hit and candidate.cache_hit),
+        "selected_crf": candidate.crf,
+        "vmaf_mean": candidate.vmaf_mean,
+        "vmaf_p5": candidate.vmaf_p5,
+        "ssim": candidate.ssim,
+        "encode_speed_x": candidate.encode_speed_x,
+        "quality_pass": candidate.quality_pass,
+        "thresholds": thresholds.to_dict(),
+        "short_search": None,
+        "target_selection": None,
+        "full_attempts": [candidate.to_dict()],
+        "selected_candidate": candidate.to_dict(),
+        "config": scheme.to_dict(full_reference.video.fps),
+        "conditions": conditions.to_dict(),
+        "adaptive_quantization": aq.to_dict(),
         "roi": None,
         "denoise": None,
     }
@@ -1040,15 +1268,6 @@ def run_multi_encode(
     output_dir.mkdir(parents=True, exist_ok=True)
     input_source = probe_video(toolchain.ffprobe, input_path)
     _notify_progress(progress_callback, "preparing_reference")
-    short_duration = min(SHORT_SEARCH_SECONDS, input_source.duration_seconds)
-    short_reference = prepare_reference(
-        toolchain=toolchain,
-        input_path=input_path,
-        output_dir=output_dir / "work" / "short_reference",
-        start_seconds=0.0,
-        duration_seconds=short_duration,
-        source=input_source,
-    )
     full_reference = prepare_reference(
         toolchain=toolchain,
         input_path=input_path,
@@ -1057,70 +1276,28 @@ def run_multi_encode(
         duration_seconds=input_source.duration_seconds,
         source=input_source,
     )
-    _notify_progress(progress_callback, "encoding_default")
+    _notify_progress(progress_callback, "encoding_h264_native")
     strategies: List[Dict] = [
-        _default_strategy(toolchain, full_reference, output_dir)
+        _h264_native_strategy(toolchain, full_reference, output_dir)
     ]
-    strategy_results = {"default_x265": strategies[0]}
     default_bitrate = strategies[0]["average_video_packet_bitrate_bps"]
-    for strategy in multi_encode_strategies():
-        try:
-            result = _composite_strategy(
-                toolchain=toolchain,
-                input_source=input_source,
-                short_reference=short_reference,
-                full_reference=full_reference,
-                roi_config_path=roi_config_path,
-                output_dir=output_dir,
-                strategy=strategy,
-                default_bitrate_bps=default_bitrate,
-                progress_callback=progress_callback,
-                budget_reference=strategy_results.get(strategy.budget_reference),
-            )
-        except ValueError as exc:
-            result = _failed_strategy_from_exception(
-                strategy,
-                str(exc),
-                input_source.fps,
-            )
-        strategies.append(result)
-        strategy_results[strategy.strategy_id] = result
-
-    general = strategy_results.get("generic_no_roi")
-    general_bitrate = (
-        general.get("average_video_packet_bitrate_bps")
-        if general and general.get("status") == "completed"
-        else None
+    strategies.append(
+        _fixed_hevc_strategy(
+            toolchain=toolchain,
+            input_source=input_source,
+            full_reference=full_reference,
+            output_dir=output_dir,
+            default_bitrate_bps=default_bitrate,
+            progress_callback=progress_callback,
+        )
     )
-    for strategy in strategies[1:]:
-        bitrate = strategy.get("average_video_packet_bitrate_bps")
-        if strategy["status"] == "completed" and bitrate is not None:
-            strategy["saving_vs_default_pct"] = bitrate_saving_vs_default_pct(
-                default_bitrate,
-                bitrate,
-            )
-            if strategy["strategy_id"] == "generic_no_roi":
-                strategy["saving_vs_general_no_roi_pct"] = 0.0
-            elif general_bitrate is not None:
-                strategy["saving_vs_general_no_roi_pct"] = bitrate_saving_vs_default_pct(
-                    general_bitrate,
-                    bitrate,
-                )
-            (
-                strategy["target_saving_met"],
-                strategy["saving_target_status"],
-            ) = _saving_target_status(
-                strategy["saving_vs_default_pct"],
-                strategy.get("target_saving_min_pct"),
-                strategy.get("target_saving_max_pct"),
-            )
 
     payload = {
         "schema_version": MULTI_ENCODE_SCHEMA_VERSION,
         "pipeline_version": MULTI_ENCODE_PIPELINE_VERSION,
-        "study": "x265默认编码与 V1.4 预算中性 ROI 四路输出",
+        "study": "V1.6 H.264 原生编码与 H.265 固定参数方案",
         "input": input_source.to_dict(),
-        "short_reference": short_reference.to_dict(),
+        "short_reference": None,
         "full_reference": full_reference.to_dict(),
         "comparison_policy": {
             "crf_pairing": False,
@@ -1128,9 +1305,10 @@ def run_multi_encode(
             "winner_selection": False,
             "deployment_conclusion": False,
             "saving_is_informational_only": True,
-            "roi_budget_reference_strategy_id": "generic_no_roi",
-            "roi_budget_neutral_required": True,
-            "roi_region_quality_must_not_decrease": True,
+            "default_strategy_id": "default_h264",
+            "fixed_hevc_crf": V1_6_HEVC_FIXED_CRF,
+            "roi_enabled": False,
+            "denoise_enabled": False,
         },
         "strategies": strategies,
     }

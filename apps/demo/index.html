@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>H.265 编码策略对比 · V1.4</title>
+    <title>H.264 原生与 H.265 固定参数对比 · V1.6</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="card">
       <header>
-        <h1 id="pageTitle">H.265 编码策略对比 · V1.4</h1>
-        <p class="subtitle" id="pageSubtitle">x265 原生默认 vs 通用无 ROI 方案 · 60 秒真实监控素材</p>
+        <h1 id="pageTitle">H.264 原生与 H.265 固定参数对比 · V1.6</h1>
+        <p class="subtitle" id="pageSubtitle">H.264 原生编码 vs H.265 固定参数方案 · 60 秒监控素材</p>
       </header>
 
       <nav class="strategy-tabs" role="tablist" aria-label="方案类型">
@@ -31,18 +31,13 @@
           <video class="media ours" id="oursVideo" preload="auto" playsinline loop muted></video>
 
           <div class="label base">
-            <div class="name" id="baseName">默认方案</div>
+            <div class="name" id="baseName">H.264 原生编码</div>
             <div>Resolution: <span id="baseResolution">--</span></div>
             <div>Bitrate: <span class="hl" id="baseBitrate">--</span></div>
             <div>CRF: <span id="baseCrf">--</span></div>
           </div>
 
-          <div class="label ours">
-            <div class="name" id="oursName">保守方案</div>
-            <div>Resolution: <span id="oursResolution">--</span></div>
-            <div>Bitrate: <span class="hl" id="oursBitrate">--</span></div>
-            <div>CRF: <span id="oursCrf">--</span></div>
-          </div>
+          <div class="label ours" id="oursLabel">CRF 36.0 · preset medium · GOP 10s · ref 6 · b-frames 8 · lookahead 90 · 无roi · 无降噪</div>
 
           <div class="divider" id="divider" tabindex="0" role="slider" aria-valuenow="50" aria-valuemin="0" aria-valuemax="100">
             <div class="badge">
@@ -85,7 +80,7 @@
             <circle cx="12" cy="13" r="4"></circle>
           </svg>
           <div class="title" id="placeholderTitle">专用方案对比待补充</div>
-          <div class="desc" id="placeholderDesc">本 Tab 预留，后续将接入专用场景下的 ROI / 降噪方案对比结果。</div>
+          <div class="desc" id="placeholderDesc">本 Tab 预留给后续专用场景策略对比。</div>
         </div>
       </section>
 

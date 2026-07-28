@@ -23,7 +23,7 @@ def _format_metric(value, digits=3):
 
 
 def _format_markdown_metric(value, digits=3):
-    return "—" if value is None else f"{value:.{digits}f}"
+    return "-" if value is None else f"{value:.{digits}f}"
 
 
 def write_multi_encode_reports(output_dir: Path, payload: dict) -> dict:
@@ -102,36 +102,29 @@ def write_multi_encode_reports(output_dir: Path, payload: dict) -> dict:
             )
 
     lines = [
-        "# x265默认编码与 V1.4 预算中性 ROI 最终数据",
+        "# V1.6 H.264 原生编码与 H.265 固定参数方案最终数据",
         "",
-        "| 编码策略 | 输出分辨率 | 平均视频包码率 | CRF | VMAF | P5 | SSIM | 编码速度 | 相对默认节省 | 相对通用节省 | 预算中性 | ROI重点区域保持 | ROI重点区域改善 |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|:---:|:---:|:---:|",
+        "| 编码策略 | 输出分辨率 | 平均视频包码率 | CRF | VMAF | P5 | SSIM | 编码速度 | 相对 H.264 原生节省 |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for strategy in payload["strategies"]:
         bitrate = strategy.get("average_video_packet_bitrate_bps")
-        if bitrate is None:
-            bitrate_text = "未生成"
-        else:
-            bitrate_text = f"{bitrate / 1_000_000.0:.6f} Mbit/s"
+        bitrate_text = (
+            "未生成" if bitrate is None else f"{bitrate / 1_000_000.0:.6f} Mbit/s"
+        )
         saving = strategy.get("saving_vs_default_pct")
-        saving_text = "—" if saving is None else f"{saving:.2f}%"
-        general_saving = strategy.get("saving_vs_general_no_roi_pct")
-        general_saving_text = "—" if general_saving is None else f"{general_saving:.2f}%"
+        saving_text = "-" if saving is None else f"{saving:.2f}%"
         crf_text = _format_markdown_metric(strategy.get("selected_crf"), 1)
         vmaf_text = _format_markdown_metric(strategy.get("vmaf_mean"), 3)
         p5_text = _format_markdown_metric(strategy.get("vmaf_p5"), 3)
         ssim_text = _format_markdown_metric(strategy.get("ssim"), 6)
         speed = strategy.get("encode_speed_x")
-        speed_text = "—" if speed is None else f"{speed:.3f}x"
+        speed_text = "-" if speed is None else f"{speed:.3f}x"
         resolution = strategy.get("resolution") or "未生成"
-        budget_text = _format_bool(strategy.get("budget_neutral_pass")) or "—"
-        roi_keep_text = _format_bool(strategy.get("roi_quality_preserved")) or "—"
-        roi_improve_text = _format_bool(strategy.get("roi_quality_improved")) or "—"
         lines.append(
             f"| {strategy['title']} | {resolution} | {bitrate_text} | "
             f"{crf_text} | {vmaf_text} | {p5_text} | {ssim_text} | "
-            f"{speed_text} | {saving_text} | {general_saving_text} | "
-            f"{budget_text} | {roi_keep_text} | {roi_improve_text} |"
+            f"{speed_text} | {saving_text} |"
         )
     failures = [
         strategy
@@ -153,8 +146,8 @@ def write_multi_encode_reports(output_dir: Path, payload: dict) -> dict:
     lines.extend(
         [
             "",
-            "ROI 候选只能在通用无 ROI 方案的平均视频包码率预算内重新分配码率；"
-            "超过预算或重点区域质量下降时标记失败，不伪造成收益。",
+            "V1.6 正式入口只生成 H.264 原生编码和 H.265 固定参数方案；"
+            "H.265 参数固定为 CRF 36.0、preset medium、GOP 10s、ref 6、b-frames 8、lookahead 90，且无 ROI、无降噪。",
             "",
             "码率节省百分比只作数据记录；本报告保留负节省，不评选胜出方案，"
             "不输出部署结论，也不把软件编码结果表述为摄像头实机结果。",

@@ -1,24 +1,34 @@
 import json
-import os
+import queue
 import shutil
 import subprocess
 import threading
+import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
+from ..core.configs import v1_comparison_plan
 from ..core.models import Toolchain
 from ..tools import discover_toolchain
 
 
 LIVE_STREAM_STATUSES = ("starting", "running", "failed", "stopped")
+LIVE_VARIANTS = ("h264_native", "h265_optimized")
 HLS_PLAYLIST = "live.m3u8"
 HLS_SEGMENT_PATTERN = "segment_%05d.ts"
 HLS_ALLOWED_SUFFIXES = {".m3u8", ".ts"}
-LIVE_VARIANTS = ("source", "conservative")
+HEVC_FIXED_CRF = 36.0
+HEVC_FIXED_PRESET = "medium"
+PREVIEW_CRF = 18
+PREVIEW_PRESET = "ultrafast"
+BITRATE_WINDOW_SECONDS = 30.0
+FRAME_QUEUE_SIZE = 2
+HEARTBEAT_TIMEOUT_SECONDS = 10.0
 
 ToolchainFactory = Callable[[], Toolchain]
 ProcessFactory = Callable[..., subprocess.Popen]
@@ -91,66 +101,106 @@ def _fps_from_fraction(value: str) -> Optional[float]:
     numerator, denominator = value.split("/", 1)
     try:
         den = float(denominator)
-        if den == 0:
-            return None
-        return float(numerator) / den
+        return None if den == 0 else float(numerator) / den
     except ValueError:
         return None
+
+
+@dataclass
+class RollingBitrate:
+    window_seconds: float = BITRATE_WINDOW_SECONDS
+    samples: Deque[Tuple[float, int]] = field(default_factory=deque)
+    total_bytes: int = 0
+    first_sample_at: Optional[float] = None
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def add(self, byte_count: int, now: Optional[float] = None) -> None:
+        if byte_count <= 0:
+            return
+        timestamp = time.monotonic() if now is None else now
+        with self.lock:
+            if self.first_sample_at is None:
+                self.first_sample_at = timestamp
+            self.samples.append((timestamp, byte_count))
+            self.total_bytes += byte_count
+            self._prune(timestamp)
+
+    def snapshot(self, now: Optional[float] = None) -> Dict[str, Any]:
+        timestamp = time.monotonic() if now is None else now
+        with self.lock:
+            self._prune(timestamp)
+            if not self.samples or self.first_sample_at is None:
+                return {"bitrate_mbps": None, "window_seconds": 0.0, "bytes": 0}
+            oldest = max(self.first_sample_at, timestamp - self.window_seconds)
+            duration = max(0.001, timestamp - oldest)
+            bitrate = self.total_bytes * 8 / duration / 1_000_000
+            return {
+                "bitrate_mbps": bitrate,
+                "window_seconds": min(duration, self.window_seconds),
+                "bytes": self.total_bytes,
+            }
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self.window_seconds
+        while self.samples and self.samples[0][0] < cutoff:
+            _, byte_count = self.samples.popleft()
+            self.total_bytes -= byte_count
 
 
 @dataclass
 class StreamOutput:
     variant: str
     title: str
-    rtsp_url: str
-    masked_url: str
-    stream_dir: Path
-    metric_dir: Path
-    process: Optional[subprocess.Popen] = field(default=None, repr=False)
-    metric_process: Optional[subprocess.Popen] = field(default=None, repr=False)
+    preview_dir: Path
+    probe: Dict[str, Any]
+    encoder_process: Optional[subprocess.Popen] = field(default=None, repr=False)
+    preview_process: Optional[subprocess.Popen] = field(default=None, repr=False)
     status: str = "starting"
-    metric_status: str = "starting"
     error: Optional[str] = None
-    metric_error: Optional[str] = None
+    log_tail: List[str] = field(default_factory=list)
+    preview_log_tail: List[str] = field(default_factory=list)
+    bitrate: RollingBitrate = field(default_factory=RollingBitrate, repr=False)
+    encoded_frames: int = 0
+    encode_fps: Optional[float] = None
+    encode_speed_x: Optional[float] = None
     started_at: Optional[str] = None
     stopped_at: Optional[str] = None
-    log_tail: List[str] = field(default_factory=list)
-    metric_log_tail: List[str] = field(default_factory=list)
-    log_thread: Optional[threading.Thread] = field(default=None, repr=False)
-    metric_log_thread: Optional[threading.Thread] = field(default=None, repr=False)
-    metrics: Dict[str, Any] = field(default_factory=dict)
-    probe: Dict[str, Any] = field(default_factory=dict)
-    preview_mode: str = "starting"
+    preview_mode: str = "decoded_native_to_h264_hls"
 
     @property
     def playlist_path(self) -> Path:
-        return self.stream_dir / HLS_PLAYLIST
+        return self.preview_dir / HLS_PLAYLIST
 
     @property
     def segment_pattern(self) -> Path:
-        return self.stream_dir / HLS_SEGMENT_PATTERN
-
-    @property
-    def metric_playlist_path(self) -> Path:
-        return self.metric_dir / HLS_PLAYLIST
-
-    @property
-    def metric_segment_pattern(self) -> Path:
-        return self.metric_dir / HLS_SEGMENT_PATTERN
+        return self.preview_dir / HLS_SEGMENT_PATTERN
 
 
 @dataclass
 class LiveStream:
     stream_id: str
+    source_url: str
+    masked_url: str
     stream_dir: Path
-    single_input_debug: bool = False
+    source_probe: Dict[str, Any]
+    outputs: Dict[str, StreamOutput]
     status: str = "starting"
     error: Optional[str] = None
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     started_at: Optional[str] = None
     stopped_at: Optional[str] = None
-    outputs: Dict[str, StreamOutput] = field(default_factory=dict)
+    ingest_process: Optional[subprocess.Popen] = field(default=None, repr=False)
+    stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    frame_queue: queue.Queue = field(
+        default_factory=lambda: queue.Queue(maxsize=FRAME_QUEUE_SIZE), repr=False
+    )
+    threads: List[threading.Thread] = field(default_factory=list, repr=False)
+    source_frames: int = 0
+    delivered_frames: int = 0
+    dropped_frames: int = 0
+    last_heartbeat_at: float = field(default_factory=time.monotonic, repr=False)
+    cleanup_started: bool = field(default=False, repr=False)
 
     def playlist_url(self, variant: str) -> Optional[str]:
         output = self.outputs.get(variant)
@@ -158,43 +208,57 @@ class LiveStream:
             return None
         return f"/api/streams/{self.stream_id}/hls/{variant}/{HLS_PLAYLIST}"
 
+    def output_metrics(self, output: StreamOutput) -> Dict[str, Any]:
+        native = output.bitrate.snapshot()
+        fps = self.source_probe.get("fps")
+        latency = None
+        if isinstance(fps, (int, float)) and fps > 0:
+            latency = max(0.0, (self.delivered_frames - output.encoded_frames) / fps)
+        return {
+            "native_bitrate_mbps": native["bitrate_mbps"],
+            "native_window_seconds": native["window_seconds"],
+            "native_bytes_in_window": native["bytes"],
+            "encoded_bitrate_mbps": native["bitrate_mbps"],
+            "encoded_window_seconds": native["window_seconds"],
+            "encoded_frame_count": output.encoded_frames,
+            "encode_fps": output.encode_fps,
+            "encode_speed_x": output.encode_speed_x,
+            "dropped_frames": self.dropped_frames,
+            "latency_seconds": latency,
+        }
+
     def bandwidth_saving_pct(self) -> Optional[float]:
-        source = self.outputs.get("source")
-        conservative = self.outputs.get("conservative")
-        if source is None or conservative is None:
+        h264 = self.outputs.get("h264_native")
+        h265 = self.outputs.get("h265_optimized")
+        if not h264 or not h265:
             return None
-        source_mbps = source.metrics.get("camera_bitrate_mbps")
-        conservative_mbps = conservative.metrics.get("camera_bitrate_mbps")
-        if not isinstance(source_mbps, (int, float)) or source_mbps <= 0:
+        h264_mbps = h264.bitrate.snapshot()["bitrate_mbps"]
+        h265_mbps = h265.bitrate.snapshot()["bitrate_mbps"]
+        if not isinstance(h264_mbps, (int, float)) or h264_mbps <= 0:
             return None
-        if not isinstance(conservative_mbps, (int, float)):
+        if not isinstance(h265_mbps, (int, float)):
             return None
-        return ((source_mbps - conservative_mbps) / source_mbps) * 100
+        return ((h264_mbps - h265_mbps) / h264_mbps) * 100
 
     def public_status(self) -> Dict[str, Any]:
-        source_url = self.playlist_url("source")
-        conservative_url = self.playlist_url("conservative")
-        masked_urls = {
-            variant: output.masked_url for variant, output in self.outputs.items()
-        }
-        probes = {
-            variant: dict(output.probe) for variant, output in self.outputs.items()
-        }
+        h264_url = self.playlist_url("h264_native")
+        h265_url = self.playlist_url("h265_optimized")
+        probes = {variant: dict(output.probe) for variant, output in self.outputs.items()}
         return {
             "stream_id": self.stream_id,
             "status": self.status,
-            "masked_url": " / ".join(
-                f"{variant}: {masked_urls.get(variant, '--')}" for variant in LIVE_VARIANTS
-            ),
-            "masked_urls": masked_urls,
-            "playlist_url": source_url,
-            "source_playlist_url": source_url,
-            "conservative_playlist_url": conservative_url,
-            "probe": probes.get("source", {}),
+            "masked_url": self.masked_url,
+            "masked_urls": {variant: self.masked_url for variant in LIVE_VARIANTS},
+            "playlist_url": h264_url,
+            "h264_native_playlist_url": h264_url,
+            "h265_optimized_playlist_url": h265_url,
+            "probe": probes.get("h264_native", {}),
             "probes": probes,
             "bandwidth_saving_pct": self.bandwidth_saving_pct(),
-            "saving_basis": "camera_input_packet_bitrate",
-            "single_input_debug": self.single_input_debug,
+            "saving_basis": "native_elementary_stream_bytes_rolling_30s",
+            "preview_codec": "h264",
+            "preview_only": True,
+            "dropped_frames": self.dropped_frames,
             "error": self.error,
             "last_error": self.error,
             "created_at": self.created_at,
@@ -206,15 +270,15 @@ class LiveStream:
                     "variant": output.variant,
                     "title": output.title,
                     "status": output.status,
-                    "metric_status": output.metric_status,
+                    "metric_status": "native_elementary_stream",
                     "playlist_url": self.playlist_url(variant),
+                    "preview_url": self.playlist_url(variant),
                     "error": output.error,
-                    "metric_error": output.metric_error,
                     "preview_mode": output.preview_mode,
                     "probe": dict(output.probe),
-                    "metrics": dict(output.metrics),
+                    "metrics": self.output_metrics(output),
                     "log_tail": list(output.log_tail[-5:]),
-                    "metric_log_tail": list(output.metric_log_tail[-5:]),
+                    "preview_log_tail": list(output.preview_log_tail[-5:]),
                 }
                 for variant, output in self.outputs.items()
             },
@@ -227,7 +291,7 @@ class LiveStream:
             output = self.outputs.get(variant)
             if output:
                 lines.extend(f"{variant}: {line}" for line in output.log_tail[-2:])
-                lines.extend(f"{variant} metric: {line}" for line in output.metric_log_tail[-1:])
+                lines.extend(f"{variant} preview: {line}" for line in output.preview_log_tail[-1:])
         return lines[-6:]
 
 
@@ -239,17 +303,25 @@ class LiveStreamManager:
         process_factory: ProcessFactory = subprocess.Popen,
         probe_factory: ProbeFactory = subprocess.run,
         max_active_streams: int = 1,
+        enable_io_threads: bool = True,
+        heartbeat_timeout_seconds: float = HEARTBEAT_TIMEOUT_SECONDS,
     ) -> None:
         self.streams_root = streams_root.expanduser().resolve()
         self.toolchain_factory = toolchain_factory
         self.process_factory = process_factory
         self.probe_factory = probe_factory
         self.max_active_streams = max_active_streams
+        self.enable_io_threads = enable_io_threads
+        self.heartbeat_timeout_seconds = heartbeat_timeout_seconds
         self.streams_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._streams: Dict[str, LiveStream] = {}
+        self._closed = threading.Event()
+        self._watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self._watchdog.start()
 
     def close(self) -> None:
+        self._closed.set()
         with self._lock:
             stream_ids = list(self._streams)
         for stream_id in stream_ids:
@@ -264,44 +336,52 @@ class LiveStreamManager:
         conservative_rtsp_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         source_url = _validate_rtsp_url(source_rtsp_url)
-        conservative_url = _validate_rtsp_url(conservative_rtsp_url or source_rtsp_url)
+        if conservative_rtsp_url and conservative_rtsp_url.strip() != source_url:
+            raise ValueError("V1.6 实时预览只需要一个原始 RTSP 地址")
         with self._lock:
             active_count = sum(
                 1 for stream in self._streams.values() if stream.status in {"starting", "running"}
             )
             if active_count >= self.max_active_streams:
                 raise StreamLimitExceeded("已有实时预览正在运行，请先停止当前拉流")
-            stream_id = uuid.uuid4().hex
-            stream_dir = self.streams_root / stream_id
-            stream_dir.mkdir(parents=True, exist_ok=True)
-            stream = LiveStream(
-                stream_id=stream_id,
-                stream_dir=stream_dir,
-                single_input_debug=conservative_rtsp_url is None,
+
+        toolchain = self.toolchain_factory()
+        masked_url = _mask_rtsp_url(source_url)
+        source_probe = self._probe_stream(toolchain, source_url, masked_url)
+        width = source_probe.get("width")
+        height = source_probe.get("height")
+        fps = source_probe.get("fps")
+        if not source_probe.get("ok") or not width or not height or not fps:
+            detail = source_probe.get("error") or "无法获得 RTSP 分辨率和帧率"
+            raise ValueError(f"RTSP 探测失败：{detail}")
+
+        stream_id = uuid.uuid4().hex
+        stream_dir = self.streams_root / stream_id
+        stream_dir.mkdir(parents=True, exist_ok=True)
+        outputs: Dict[str, StreamOutput] = {}
+        for variant, title in (
+            ("h264_native", "H.264 原生参数编码"),
+            ("h265_optimized", "H.265 编码参数优化"),
+        ):
+            preview_dir = stream_dir / variant
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            outputs[variant] = StreamOutput(
+                variant=variant,
+                title=title,
+                preview_dir=preview_dir,
+                probe=self._encoded_probe(source_probe, variant),
             )
-            stream.outputs = {
-                "source": StreamOutput(
-                    "source",
-                    "原生 H.264 摄像头流",
-                    source_url,
-                    _mask_rtsp_url(source_url),
-                    stream_dir / "source",
-                    stream_dir / "metrics" / "source",
-                ),
-                "conservative": StreamOutput(
-                    "conservative",
-                    "H.265 保守策略摄像头流",
-                    conservative_url,
-                    _mask_rtsp_url(conservative_url),
-                    stream_dir / "conservative",
-                    stream_dir / "metrics" / "conservative",
-                ),
-            }
-            for output in stream.outputs.values():
-                output.stream_dir.mkdir(parents=True, exist_ok=True)
-                output.metric_dir.mkdir(parents=True, exist_ok=True)
+        stream = LiveStream(
+            stream_id=stream_id,
+            source_url=source_url,
+            masked_url=masked_url,
+            stream_dir=stream_dir,
+            source_probe=source_probe,
+            outputs=outputs,
+        )
+        with self._lock:
             self._streams[stream_id] = stream
-        self._start_processes(stream)
+        self._start_pipeline(toolchain, stream)
         return self.get_status(stream_id)
 
     def get_status(self, stream_id: str) -> Dict[str, Any]:
@@ -310,28 +390,29 @@ class LiveStreamManager:
             self._refresh_status_locked(stream)
             return stream.public_status()
 
-    def stop_stream(self, stream_id: str) -> Dict[str, Any]:
+    def heartbeat(self, stream_id: str) -> Dict[str, Any]:
         with self._lock:
             stream = self._stream_locked(stream_id)
-            outputs = list(stream.outputs.values())
+            stream.last_heartbeat_at = time.monotonic()
+            self._refresh_status_locked(stream)
+            return stream.public_status()
+
+    def stop_stream(self, stream_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
+        with self._lock:
+            stream = self._stream_locked(stream_id)
             if stream.status == "stopped":
                 return stream.public_status()
             stream.status = "stopped"
+            stream.error = reason
             stream.stopped_at = _now()
             stream.updated_at = stream.stopped_at
-            for output in outputs:
-                output.status = "stopped"
-                output.metric_status = "stopped"
-                output.stopped_at = stream.stopped_at
-        for output in outputs:
-            self._stop_process(output.process)
-            self._stop_process(output.metric_process)
-        with self._lock:
-            stream = self._stream_locked(stream_id)
+            stream.stop_event.set()
             for output in stream.outputs.values():
-                output.process = None
-                output.metric_process = None
-            self._cleanup_stream_dir(stream)
+                output.status = "stopped"
+                output.stopped_at = stream.stopped_at
+        self._terminate_pipeline(stream)
+        self._cleanup_stream_dir(stream)
+        with self._lock:
             return stream.public_status()
 
     def get_hls_file(self, stream_id: str, filename: str) -> Path:
@@ -342,8 +423,7 @@ class LiveStreamManager:
         variant, leaf = parts
         if variant not in LIVE_VARIANTS or PurePath(leaf).name != leaf:
             raise StreamNotFound(filename)
-        suffix = Path(leaf).suffix.lower()
-        if suffix not in HLS_ALLOWED_SUFFIXES:
+        if Path(leaf).suffix.lower() not in HLS_ALLOWED_SUFFIXES:
             raise StreamNotFound(filename)
         with self._lock:
             stream = self._stream_locked(stream_id)
@@ -351,25 +431,324 @@ class LiveStreamManager:
             output = stream.outputs.get(variant)
             if output is None:
                 raise StreamNotFound(filename)
-            path = (output.stream_dir / leaf).resolve()
-            if not _is_inside(path, output.stream_dir) or not path.is_file():
+            path = (output.preview_dir / leaf).resolve()
+            if not _is_inside(path, output.preview_dir) or not path.is_file():
                 raise StreamNotReady(filename)
             return path
 
-    def _start_processes(self, stream: LiveStream) -> None:
-        toolchain = self.toolchain_factory()
-        for variant in LIVE_VARIANTS:
-            output = stream.outputs[variant]
-            output.probe = self._probe_stream(toolchain, output)
-            metric_command = self._metric_command(toolchain, output)
-            preview_command = self._preview_command(toolchain, output)
-            self._start_output(stream, variant, "metric", metric_command)
-            self._start_output(stream, variant, "preview", preview_command)
+    def record_native_bytes(
+        self,
+        stream_id: str,
+        variant: str,
+        byte_count: int,
+        now: Optional[float] = None,
+    ) -> None:
         with self._lock:
-            stream.started_at = _now()
-            stream.updated_at = stream.started_at
+            stream = self._stream_locked(stream_id)
+            output = stream.outputs.get(variant)
+            if output is None:
+                raise StreamNotFound(variant)
+        output.bitrate.add(byte_count, now=now)
 
-    def _probe_stream(self, toolchain: Toolchain, output: StreamOutput) -> Dict[str, Any]:
+    def _start_pipeline(self, toolchain: Toolchain, stream: LiveStream) -> None:
+        try:
+            for output in stream.outputs.values():
+                output.preview_process = self._spawn_preview(
+                    self._preview_command(toolchain, stream, output)
+                )
+            for output in stream.outputs.values():
+                output.encoder_process = self._spawn_encoder(
+                    self._native_encoder_command(toolchain, stream, output)
+                )
+                output.started_at = _now()
+            stream.ingest_process = self._spawn_ingest(self._ingest_command(toolchain, stream))
+        except Exception as exc:
+            self._mark_failed(stream, str(exc))
+            return
+
+        stream.started_at = _now()
+        stream.updated_at = stream.started_at
+        if not self.enable_io_threads:
+            return
+
+        self._start_thread(stream, self._read_ingest_frames, stream)
+        self._start_thread(stream, self._fanout_frames, stream)
+        self._start_thread(stream, self._consume_process_log, stream, None, "ingest")
+        for output in stream.outputs.values():
+            self._start_thread(stream, self._relay_native_stream, stream, output)
+            self._start_thread(stream, self._consume_process_log, stream, output, "encoder")
+            self._start_thread(stream, self._consume_process_log, stream, output, "preview")
+
+    def _spawn_ingest(self, command: List[Any]) -> subprocess.Popen:
+        return self.process_factory(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def _spawn_encoder(self, command: List[Any]) -> subprocess.Popen:
+        return self.process_factory(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def _spawn_preview(self, command: List[Any]) -> subprocess.Popen:
+        return self.process_factory(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+    def _start_thread(self, stream: LiveStream, target: Callable, *args: Any) -> None:
+        thread = threading.Thread(target=target, args=args, daemon=True)
+        stream.threads.append(thread)
+        thread.start()
+
+    def _read_ingest_frames(self, stream: LiveStream) -> None:
+        process = stream.ingest_process
+        stdout = getattr(process, "stdout", None)
+        width = int(stream.source_probe["width"])
+        height = int(stream.source_probe["height"])
+        frame_size = width * height * 3 // 2
+        if stdout is None:
+            self._mark_failed(stream, "RTSP 解码进程没有输出管道")
+            return
+        while not stream.stop_event.is_set():
+            frame = self._read_exact(stdout, frame_size)
+            if len(frame) != frame_size:
+                if not stream.stop_event.is_set():
+                    self._mark_failed(stream, "RTSP 解码输出已中断")
+                return
+            with self._lock:
+                stream.source_frames += 1
+            try:
+                stream.frame_queue.put_nowait(frame)
+            except queue.Full:
+                try:
+                    stream.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                with self._lock:
+                    stream.dropped_frames += 1
+                try:
+                    stream.frame_queue.put_nowait(frame)
+                except queue.Full:
+                    with self._lock:
+                        stream.dropped_frames += 1
+
+    def _fanout_frames(self, stream: LiveStream) -> None:
+        while not stream.stop_event.is_set():
+            try:
+                frame = stream.frame_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                for variant in LIVE_VARIANTS:
+                    process = stream.outputs[variant].encoder_process
+                    stdin = getattr(process, "stdin", None)
+                    if stdin is None:
+                        raise BrokenPipeError(f"{variant} 编码器输入管道不可用")
+                    stdin.write(frame)
+                with self._lock:
+                    stream.delivered_frames += 1
+            except (BrokenPipeError, OSError, ValueError) as exc:
+                if not stream.stop_event.is_set():
+                    self._mark_failed(stream, f"原生编码帧分发失败：{exc}")
+                return
+
+    def _relay_native_stream(self, stream: LiveStream, output: StreamOutput) -> None:
+        encoder_stdout = getattr(output.encoder_process, "stdout", None)
+        preview_stdin = getattr(output.preview_process, "stdin", None)
+        if encoder_stdout is None or preview_stdin is None:
+            self._mark_failed(stream, f"{output.variant} 原生码流管道不可用")
+            return
+        while not stream.stop_event.is_set():
+            chunk = encoder_stdout.read(4 * 1024)
+            if not chunk:
+                if not stream.stop_event.is_set():
+                    self._mark_failed(stream, f"{output.variant} 原生编码输出已中断")
+                return
+            output.bitrate.add(len(chunk))
+            try:
+                preview_stdin.write(chunk)
+                preview_stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as exc:
+                if not stream.stop_event.is_set():
+                    self._mark_failed(stream, f"{output.variant} 等价预览输入失败：{exc}")
+                return
+
+    def _consume_process_log(
+        self,
+        stream: LiveStream,
+        output: Optional[StreamOutput],
+        role: str,
+    ) -> None:
+        process = stream.ingest_process if role == "ingest" else getattr(output, f"{role}_process")
+        stderr = getattr(process, "stderr", None)
+        if stderr is None:
+            return
+        for raw_line in stderr:
+            if stream.stop_event.is_set():
+                return
+            line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
+            cleaned = line.strip().replace(stream.source_url, stream.masked_url)
+            if not cleaned:
+                continue
+            with self._lock:
+                if output is None:
+                    continue
+                target = output.preview_log_tail if role == "preview" else output.log_tail
+                target.append(cleaned)
+                del target[:-20]
+                if role == "encoder":
+                    self._parse_progress(output, cleaned)
+
+    def _parse_progress(self, output: StreamOutput, line: str) -> None:
+        if "=" not in line:
+            return
+        key, value = line.split("=", 1)
+        try:
+            if key == "frame":
+                output.encoded_frames = int(value.strip())
+            elif key == "fps":
+                output.encode_fps = float(value.strip())
+            elif key == "speed":
+                output.encode_speed_x = float(value.strip().rstrip("x"))
+        except ValueError:
+            return
+
+    def _read_exact(self, stream: Any, size: int) -> bytes:
+        chunks: List[bytes] = []
+        remaining = size
+        while remaining > 0:
+            chunk = stream.read(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _mark_failed(self, stream: LiveStream, message: str) -> None:
+        with self._lock:
+            if stream.status in {"failed", "stopped"}:
+                return
+            stream.status = "failed"
+            stream.error = message.replace(stream.source_url, stream.masked_url)
+            stream.stopped_at = _now()
+            stream.updated_at = stream.stopped_at
+            stream.stop_event.set()
+            for output in stream.outputs.values():
+                if output.status != "stopped":
+                    output.status = "failed"
+                    output.error = stream.error
+        threading.Thread(target=self._terminate_pipeline, args=(stream,), daemon=True).start()
+
+    def _refresh_status_locked(self, stream: LiveStream) -> None:
+        if stream.status in {"failed", "stopped"}:
+            return
+        processes = [stream.ingest_process]
+        for output in stream.outputs.values():
+            processes.extend([output.encoder_process, output.preview_process])
+        for process in processes:
+            if process is not None and process.poll() is not None:
+                self._mark_failed(stream, "实时编码子进程意外退出")
+                return
+        running = 0
+        for output in stream.outputs.values():
+            if output.playlist_path.is_file():
+                output.status = "running"
+                output.error = None
+                running += 1
+            else:
+                output.status = "starting"
+        stream.status = "running" if running == len(stream.outputs) else "starting"
+        stream.error = None
+        stream.updated_at = _now()
+
+    def _terminate_pipeline(self, stream: LiveStream) -> None:
+        with self._lock:
+            if stream.cleanup_started:
+                return
+            stream.cleanup_started = True
+        stream.stop_event.set()
+        processes: List[Optional[subprocess.Popen]] = [stream.ingest_process]
+        for output in stream.outputs.values():
+            processes.extend([output.encoder_process, output.preview_process])
+        for process in processes:
+            self._close_pipe(getattr(process, "stdin", None))
+        for process in processes:
+            self._stop_process(process)
+
+    def _close_pipe(self, pipe: Any) -> None:
+        if pipe is None:
+            return
+        try:
+            pipe.close()
+        except (OSError, ValueError):
+            pass
+
+    def _stop_process(self, process: Optional[subprocess.Popen]) -> None:
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+    def _cleanup_stream_dir(self, stream: LiveStream) -> None:
+        if stream.stream_dir.is_dir() and _is_inside(stream.stream_dir, self.streams_root):
+            shutil.rmtree(stream.stream_dir, ignore_errors=True)
+
+    def _watchdog_loop(self) -> None:
+        while not self._closed.wait(1.0):
+            now = time.monotonic()
+            with self._lock:
+                expired = [
+                    stream.stream_id
+                    for stream in self._streams.values()
+                    if stream.status in {"starting", "running"}
+                    and now - stream.last_heartbeat_at > self.heartbeat_timeout_seconds
+                ]
+            for stream_id in expired:
+                try:
+                    self.stop_stream(stream_id, "页面心跳超时，实时编码已自动停止")
+                except StreamNotFound:
+                    pass
+
+    def _stream_locked(self, stream_id: str) -> LiveStream:
+        stream = self._streams.get(stream_id)
+        if stream is None:
+            raise StreamNotFound(stream_id)
+        return stream
+
+    def _encoded_probe(self, source_probe: Dict[str, Any], variant: str) -> Dict[str, Any]:
+        probe = dict(source_probe)
+        if variant == "h264_native":
+            probe.update({
+                "codec": "h264",
+                "codec_long_name": "H.264 / AVC",
+                "crf": None,
+                "crf_label": "原生默认",
+                "encoder": "libx264",
+            })
+        else:
+            probe.update({
+                "codec": "hevc",
+                "codec_long_name": "H.265 / HEVC",
+                "crf": HEVC_FIXED_CRF,
+                "crf_label": f"{HEVC_FIXED_CRF:.1f}",
+                "encoder": "libx265",
+                "preset": HEVC_FIXED_PRESET,
+            })
+        return probe
+
+    def _probe_stream(self, toolchain: Toolchain, url: str, masked_url: str) -> Dict[str, Any]:
         command = [
             toolchain.ffprobe,
             "-hide_banner",
@@ -384,10 +763,10 @@ class LiveStreamManager:
             "-show_entries",
             "stream=codec_name,codec_long_name,profile,width,height,pix_fmt,r_frame_rate,avg_frame_rate,bit_rate,field_order",
             "-show_entries",
-            "format=format_name,duration,bit_rate",
+            "format=format_name,bit_rate",
             "-of",
             "json",
-            output.rtsp_url,
+            url,
         ]
         try:
             completed = self.probe_factory(
@@ -400,9 +779,9 @@ class LiveStreamManager:
                 timeout=15,
             )
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": str(exc).replace(url, masked_url)}
         stdout = completed.stdout or ""
-        stderr = (completed.stderr or "").strip().replace(output.rtsp_url, output.masked_url)
+        stderr = (completed.stderr or "").strip().replace(url, masked_url)
         try:
             payload = json.loads(stdout) if stdout.strip() else {}
         except json.JSONDecodeError:
@@ -433,284 +812,125 @@ class LiveStreamManager:
             "already_encoded": video.get("codec_name") not in {None, "", "rawvideo"},
         }
 
-    def _metric_command(self, toolchain: Toolchain, output: StreamOutput) -> List[Any]:
+    def _ingest_command(self, toolchain: Toolchain, stream: LiveStream) -> List[Any]:
         return [
             toolchain.ffmpeg,
             "-hide_banner",
             "-nostdin",
             "-rtsp_transport",
             "tcp",
+            "-fflags",
+            "+nobuffer",
+            "-flags",
+            "low_delay",
             "-i",
-            output.rtsp_url,
+            stream.source_url,
             "-map",
             "0:v:0",
             "-an",
-            "-c:v",
-            "copy",
-            *self._hls_args(output.metric_dir, output.metric_segment_pattern),
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rawvideo",
+            "pipe:1",
         ]
 
-    def _preview_command(self, toolchain: Toolchain, output: StreamOutput) -> List[Any]:
-        codec = str(output.probe.get("codec") or "").lower()
+    def _native_encoder_command(
+        self,
+        toolchain: Toolchain,
+        stream: LiveStream,
+        output: StreamOutput,
+    ) -> List[Any]:
+        width = int(stream.source_probe["width"])
+        height = int(stream.source_probe["height"])
+        fps = float(stream.source_probe["fps"])
         command: List[Any] = [
             toolchain.ffmpeg,
             "-hide_banner",
-            "-nostdin",
-            "-rtsp_transport",
-            "tcp",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "yuv420p",
+            "-video_size",
+            f"{width}x{height}",
+            "-framerate",
+            f"{fps:.6f}",
             "-i",
-            output.rtsp_url,
-            "-map",
-            "0:v:0",
+            "pipe:0",
             "-an",
         ]
-        if codec == "h264":
-            output.preview_mode = "copy"
-            command.extend(["-c:v", "copy"])
+        if output.variant == "h264_native":
+            command.extend(["-c:v", "libx264", "-f", "h264"])
         else:
-            output.preview_mode = "h264_preview_transcode"
             command.extend([
                 "-c:v",
-                "libx264",
+                "libx265",
                 "-preset",
-                "veryfast",
-                "-tune",
-                "zerolatency",
+                HEVC_FIXED_PRESET,
+                "-crf",
+                f"{HEVC_FIXED_CRF:.1f}",
+                "-profile:v",
+                "main",
                 "-pix_fmt",
                 "yuv420p",
+                "-x265-params",
+                self._h265_fixed_params(fps),
+                "-f",
+                "hevc",
             ])
-        command.extend(self._hls_args(output.stream_dir, output.segment_pattern))
+        command.extend(["-flush_packets", "1", "-progress", "pipe:2", "pipe:1"])
         return command
 
-    def _hls_args(self, output_dir: Path, segment_pattern: Path) -> List[Any]:
+    def _preview_command(
+        self,
+        toolchain: Toolchain,
+        stream: LiveStream,
+        output: StreamOutput,
+    ) -> List[Any]:
+        fps = float(stream.source_probe["fps"])
+        gop = max(1, round(fps))
+        input_format = "h264" if output.variant == "h264_native" else "hevc"
         return [
+            toolchain.ffmpeg,
+            "-hide_banner",
+            "-fflags",
+            "+genpts",
+            "-r",
+            f"{fps:.6f}",
+            "-f",
+            input_format,
+            "-i",
+            "pipe:0",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            PREVIEW_PRESET,
+            "-crf",
+            str(PREVIEW_CRF),
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            str(gop),
+            "-keyint_min",
+            str(gop),
+            "-sc_threshold",
+            "0",
             "-f",
             "hls",
             "-hls_time",
-            "2",
+            "1",
             "-hls_list_size",
-            "4",
+            "10",
             "-hls_flags",
-            "delete_segments+omit_endlist",
+            "delete_segments+omit_endlist+independent_segments",
             "-hls_segment_filename",
-            segment_pattern,
-            output_dir / HLS_PLAYLIST,
+            output.segment_pattern,
+            output.playlist_path,
         ]
 
-    def _start_output(
-        self,
-        stream: LiveStream,
-        variant: str,
-        role: str,
-        command: List[Any],
-    ) -> None:
-        output = stream.outputs[variant]
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-        try:
-            process = self.process_factory(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=creationflags,
-            )
-        except Exception as exc:
-            with self._lock:
-                if role == "metric":
-                    output.metric_status = "failed"
-                    output.metric_error = str(exc)
-                else:
-                    output.status = "failed"
-                    output.error = str(exc)
-                    stream.status = "failed"
-                    stream.error = str(exc)
-                stream.updated_at = _now()
-            return
-        with self._lock:
-            if role == "metric":
-                output.metric_process = process
-            else:
-                output.process = process
-                output.started_at = _now()
-        thread = threading.Thread(
-            target=self._consume_stderr,
-            args=(stream.stream_id, variant, role, process),
-            daemon=True,
-        )
-        with self._lock:
-            if role == "metric":
-                output.metric_log_thread = thread
-            else:
-                output.log_thread = thread
-        thread.start()
-
-    def _consume_stderr(
-        self,
-        stream_id: str,
-        variant: str,
-        role: str,
-        process: subprocess.Popen,
-    ) -> None:
-        if process.stderr is None:
-            return
-        for line in process.stderr:
-            with self._lock:
-                stream = self._streams.get(stream_id)
-                if stream is None:
-                    return
-                output = stream.outputs.get(variant)
-                if output is None:
-                    return
-                cleaned = line.strip().replace(output.rtsp_url, output.masked_url)
-                if not cleaned:
-                    continue
-                if role == "metric":
-                    output.metric_log_tail.append(cleaned)
-                    output.metric_log_tail = output.metric_log_tail[-20:]
-                else:
-                    output.log_tail.append(cleaned)
-                    output.log_tail = output.log_tail[-20:]
-                stream.updated_at = _now()
-
-    def _refresh_status_locked(self, stream: LiveStream) -> None:
-        if stream.status == "stopped":
-            return
-        failures: List[str] = []
-        running_count = 0
-        for output in stream.outputs.values():
-            process = output.process
-            metric_process = output.metric_process
-            if output.status not in {"failed", "stopped"} and output.playlist_path.exists():
-                output.status = "running"
-                output.error = None
-            if output.metric_status not in {"failed", "stopped"} and output.metric_playlist_path.exists():
-                output.metric_status = "running"
-                output.metric_error = None
-            if output.status not in {"failed", "stopped"} and process is not None and process.poll() is not None:
-                output.status = "failed"
-                output.error = output.log_tail[-1] if output.log_tail else "FFmpeg 预览进程已退出"
-                output.stopped_at = _now()
-            if (
-                output.metric_status not in {"failed", "stopped"}
-                and metric_process is not None
-                and metric_process.poll() is not None
-            ):
-                output.metric_status = "failed"
-                output.metric_error = (
-                    output.metric_log_tail[-1] if output.metric_log_tail else "FFmpeg 计量进程已退出"
-                )
-            output.metrics = self._combined_metrics(output)
-            if output.status == "failed":
-                failures.append(f"{output.variant}: {output.error or 'unknown error'}")
-            elif output.status == "running":
-                running_count += 1
-        if failures:
-            stopped_at = _now()
-            for output in stream.outputs.values():
-                if output.status not in {"failed", "stopped"}:
-                    self._stop_process(output.process)
-                    output.process = None
-                    output.status = "stopped"
-                    output.stopped_at = stopped_at
-                if output.metric_status not in {"failed", "stopped"}:
-                    self._stop_process(output.metric_process)
-                    output.metric_process = None
-                    output.metric_status = "stopped"
-            stream.status = "failed"
-            stream.error = failures[-1]
-            stream.stopped_at = stopped_at
-        elif running_count == len(stream.outputs):
-            stream.status = "running"
-            stream.error = None
-        else:
-            stream.status = "starting"
-            stream.error = None
-        stream.updated_at = _now()
-
-    def _combined_metrics(self, output: StreamOutput) -> Dict[str, Any]:
-        camera = self._hls_metrics(output.metric_dir / HLS_PLAYLIST)
-        preview = self._hls_metrics(output.playlist_path)
-        camera_bitrate = camera.get("bitrate_mbps") or output.probe.get("declared_bitrate_mbps")
-        return {
-            "camera_bitrate_mbps": camera_bitrate,
-            "camera_segment_count": camera.get("segment_count"),
-            "camera_window_seconds": camera.get("window_seconds"),
-            "preview_bitrate_mbps": preview.get("bitrate_mbps"),
-            "preview_segment_count": preview.get("segment_count"),
-            "preview_window_seconds": preview.get("window_seconds"),
-            "bitrate_mbps": camera_bitrate,
-        }
-
-    def _hls_metrics(self, playlist_path: Path) -> Dict[str, Any]:
-        if not playlist_path.is_file():
-            return {
-                "bitrate_mbps": None,
-                "segment_count": 0,
-                "window_seconds": None,
-            }
-        try:
-            lines = playlist_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return {
-                "bitrate_mbps": None,
-                "segment_count": 0,
-                "window_seconds": None,
-            }
-        pending_duration: Optional[float] = None
-        total_seconds = 0.0
-        total_bytes = 0
-        segment_count = 0
-        output_dir = playlist_path.parent
-        for raw_line in lines:
-            line = raw_line.strip()
-            if not line:
-                continue
-            if line.startswith("#EXTINF:"):
-                value = line.removeprefix("#EXTINF:").split(",", 1)[0]
-                try:
-                    pending_duration = float(value)
-                except ValueError:
-                    pending_duration = None
-                continue
-            if line.startswith("#") or pending_duration is None:
-                continue
-            leaf = PurePath(line).name
-            if leaf != line or Path(leaf).suffix.lower() != ".ts":
-                pending_duration = None
-                continue
-            segment_path = output_dir / leaf
-            if segment_path.is_file():
-                total_seconds += pending_duration
-                total_bytes += segment_path.stat().st_size
-                segment_count += 1
-            pending_duration = None
-        bitrate_mbps = None
-        if total_seconds > 0 and total_bytes > 0:
-            bitrate_mbps = (total_bytes * 8) / total_seconds / 1_000_000
-        return {
-            "bitrate_mbps": bitrate_mbps,
-            "segment_count": segment_count,
-            "window_seconds": total_seconds if segment_count else None,
-        }
-
-    def _stop_process(self, process: Optional[subprocess.Popen]) -> None:
-        if process is None or process.poll() is not None:
-            return
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-
-    def _cleanup_stream_dir(self, stream: LiveStream) -> None:
-        if stream.stream_dir.is_dir() and _is_inside(stream.stream_dir, self.streams_root):
-            shutil.rmtree(stream.stream_dir, ignore_errors=True)
-
-    def _stream_locked(self, stream_id: str) -> LiveStream:
-        stream = self._streams.get(stream_id)
-        if stream is None:
-            raise StreamNotFound(stream_id)
-        return stream
+    def _h265_fixed_params(self, fps: Optional[float]) -> str:
+        plan = v1_comparison_plan("aggressive")
+        return plan.optimized.x265_params(fps or 25.0)

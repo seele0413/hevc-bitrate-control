@@ -16,53 +16,36 @@ from .preview import generate_browser_preview
 WEB_STAGE_ORDER = [
     "queued",
     "preparing_reference",
-    "encoding_default",
-    "searching_general",
-    "validating_general",
-    "searching_roi",
-    "validating_roi",
-    "searching_roi_denoise",
-    "validating_roi_denoise",
+    "encoding_h264_native",
+    "encoding_hevc_fixed",
     "generating_previews",
     "completed",
     "failed",
 ]
 
 WEB_STAGE_TITLES = {
+    "encoding_h264_native": "编码 H.264 原生方案",
+    "encoding_hevc_fixed": "编码 H.265 固定参数方案",
     "queued": "排队中",
     "preparing_reference": "准备参考画面",
-    "encoding_default": "编码默认方案",
-    "searching_general": "搜索通用无 ROI 方案",
-    "validating_general": "验证通用无 ROI 方案",
-    "searching_roi": "搜索预算中性 ROI",
-    "validating_roi": "验证 ROI 预算和重点区域",
-    "searching_roi_denoise": "搜索 ROI + 降噪实验项",
-    "validating_roi_denoise": "验证降噪预算和重点区域",
     "generating_previews": "生成浏览器 H.264 预览",
     "completed": "已完成",
     "failed": "失败",
 }
 
 WEB_STAGE_PROGRESS = {
+    "encoding_h264_native": 28,
+    "encoding_hevc_fixed": 72,
     "queued": 0,
     "preparing_reference": 5,
-    "encoding_default": 18,
-    "searching_general": 30,
-    "validating_general": 40,
-    "searching_roi": 52,
-    "validating_roi": 62,
-    "searching_roi_denoise": 74,
-    "validating_roi_denoise": 84,
     "generating_previews": 92,
     "completed": 100,
     "failed": 100,
 }
 
 STRATEGY_DOWNLOADS = {
-    "default_x265": "default_x265.mp4",
-    "generic_no_roi": "generic_no_roi.mp4",
-    "budget_neutral_roi": "budget_neutral_roi.mp4",
-    "roi_denoise_experimental": "roi_denoise_experimental.mp4",
+    "default_h264": "default_h264.mp4",
+    "hevc_fixed": "hevc_fixed.mp4",
 }
 
 REPORT_DOWNLOADS = (

@@ -1,4 +1,4 @@
-# H.265 静态展示版
+# V1.6 静态展示版
 
 这个目录是给 Cloudflare Pages 使用的纯静态展示版。它不上传视频、不编码视频、不调用 FastAPI，也不依赖 Python、FFmpeg、任务队列或本地工作目录。
 
@@ -15,11 +15,10 @@ apps/demo/
 └─ videos/
    ├─ default_preview.mp4
    ├─ conservative_preview.mp4
-   ├─ default_x265.mp4
    └─ conservative_hevc.mp4
 ```
 
-`data/results.json` 是页面主要数据源。当前展示“监控素材二”的两路离线结果：x265 原生默认和通用无 ROI / 保守方案。H.264 预览采用 `videos/*_preview.mp4` 的扁平路径；H.265/HEVC 正式文件同样放在 `videos/` 下作为下载资源。不要把原始输入视频混作某一路编码预览。
+`data/results.json` 是页面主要数据源。当前展示 V1.6 两路离线结果：H.264 原生编码和 H.265 固定参数方案。蓝色参数标签固定在分割竖线右侧；接近右边界时由舞台容器自然裁切，不拉伸、不换行。
 
 ## Cloudflare Pages 设置
 

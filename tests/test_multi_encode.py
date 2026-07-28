@@ -10,6 +10,7 @@ from hevc_lab.core.configs import denoise_policy_for_mode, multi_encode_strategi
 from hevc_lab.core.models import (
     CandidateResult,
     DenoiseSettings,
+    MultiEncodeStrategy,
     ReferenceArtifact,
     ROIRegion,
     Toolchain,
@@ -23,10 +24,12 @@ from hevc_lab.core.search import (
 )
 from hevc_lab.encoders.x265 import (
     combined_roi_denoise_filter,
+    encode_default_h264,
     encode_default_x265,
 )
 from hevc_lab.multi_encode import (
     _composite_strategy,
+    _fixed_hevc_strategy,
     _select_short_candidate,
     bitrate_saving_vs_default_pct,
     run_multi_encode,
@@ -105,6 +108,43 @@ def public_strategy(public_mode):
     )
 
 
+def historical_strategy(public_mode):
+    if public_mode == "general":
+        return MultiEncodeStrategy(
+            public_mode="general",
+            strategy_id="generic_no_roi",
+            title="通用无 ROI 方案",
+            description="historical general",
+            source_mode="aggressive",
+            strategy_generation="v1.4_general_no_roi",
+            effective_preset="medium",
+            roi_enabled=False,
+            denoise_enabled=False,
+            target_vmaf=83.0,
+            target_vmaf_p5=80.0,
+            target_ssim=0.950,
+        )
+    if public_mode == "roi":
+        return MultiEncodeStrategy(
+            public_mode="roi",
+            strategy_id="budget_neutral_roi",
+            title="预算中性 ROI 方案",
+            description="historical roi",
+            source_mode="aggressive",
+            strategy_generation="v1.4_budget_neutral_roi",
+            effective_preset="medium",
+            roi_enabled=True,
+            denoise_enabled=False,
+            target_vmaf=83.0,
+            target_vmaf_p5=80.0,
+            target_ssim=0.950,
+            budget_reference="generic_no_roi",
+            budget_neutral_required=True,
+            roi_quality_required=True,
+        )
+    raise ValueError(public_mode)
+
+
 def region_quality(improved=True):
     region = ROIRegion(
         region_id="door",
@@ -176,6 +216,30 @@ class DefaultEncoderTests(unittest.TestCase):
             self.assertNotIn("-crf", command)
             self.assertNotIn("-preset", command)
             self.assertNotIn("-x265-params", command)
+            self.assertNotIn("-vf", command)
+            self.assertNotIn("-filter_complex", command)
+
+    def test_h264_native_encoder_passes_no_custom_encoding_flags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = video(root / "input.mkv")
+            toolchain = Toolchain(root / "ffmpeg", root / "ffprobe", root / "vmaf.json")
+            completed = SimpleNamespace(stdout="", stderr="")
+            with patch(
+                "hevc_lab.encoders.x265.run_process",
+                return_value=completed,
+            ) as mocked:
+                encode_default_h264(
+                    toolchain,
+                    source,
+                    root / "output.mp4",
+                    root / "encode.log",
+                )
+            command = [str(item) for item in mocked.call_args.args[0]]
+            self.assertIn("libx264", command)
+            self.assertNotIn("-crf", command)
+            self.assertNotIn("-preset", command)
+            self.assertNotIn("-x264-params", command)
             self.assertNotIn("-vf", command)
             self.assertNotIn("-filter_complex", command)
 
@@ -289,7 +353,7 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                     full_ref,
                     ROI_CONFIG,
                     root,
-                    public_strategy("general"),
+                    historical_strategy("general"),
                     default_bitrate_bps=500_000.0,
                     progress_callback=stages.append,
                 )
@@ -349,7 +413,7 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                     full_ref,
                     ROI_CONFIG,
                     root,
-                    public_strategy("general"),
+                    historical_strategy("general"),
                     default_bitrate_bps=500_000.0,
                 )
             self.assertEqual(result["status"], "completed")
@@ -413,7 +477,7 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                     full_ref,
                     ROI_CONFIG,
                     root,
-                    public_strategy("roi"),
+                    historical_strategy("roi"),
                     default_bitrate_bps=600_000.0,
                     budget_reference=budget_reference,
                 )
@@ -462,7 +526,7 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                     full_ref,
                     ROI_CONFIG,
                     root,
-                    public_strategy("roi"),
+                    historical_strategy("roi"),
                     default_bitrate_bps=600_000.0,
                     budget_reference=budget_reference,
                 )
@@ -518,7 +582,7 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                     full_ref,
                     ROI_CONFIG,
                     root,
-                    public_strategy("roi"),
+                    historical_strategy("roi"),
                     default_bitrate_bps=600_000.0,
                     budget_reference=budget_reference,
                 )
@@ -532,41 +596,57 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                 True,
             )
 
-    def test_run_multi_encode_outputs_default_and_v1_4_public_modes(self):
+    def test_v1_6_fixed_hevc_strategy_uses_screenshot_parameters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_source = video(root / "input.mp4")
+            full_ref = reference(root / "full.mkv", 60.0)
+            fixed = candidate(36.0, True, bitrate=300_000.0)
+            output_info = video(root / "hevc_fixed.mp4", 300_000.0)
+            toolchain = Toolchain(root / "ffmpeg", root / "ffprobe", root / "vmaf.json")
+            stages = []
+            with patch(
+                "hevc_lab.multi_encode.evaluate_scheme_crf",
+                return_value=fixed,
+            ) as evaluate, patch(
+                "hevc_lab.multi_encode._publish_candidate",
+                return_value=False,
+            ), patch(
+                "hevc_lab.multi_encode.probe_video",
+                return_value=output_info,
+            ):
+                result = _fixed_hevc_strategy(
+                    toolchain=toolchain,
+                    input_source=input_source,
+                    full_reference=full_ref,
+                    output_dir=root,
+                    default_bitrate_bps=500_000.0,
+                    progress_callback=stages.append,
+                )
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["strategy_id"], "hevc_fixed")
+            self.assertEqual(result["selected_crf"], 36.0)
+            self.assertEqual(result["effective_preset"], "medium")
+            self.assertFalse(result["roi_enabled"])
+            self.assertFalse(result["denoise_enabled"])
+            self.assertEqual(stages, ["encoding_hevc_fixed"])
+            self.assertEqual(evaluate.call_args.kwargs["crf"], 36.0)
+            self.assertIsNone(evaluate.call_args.kwargs["roi_settings"])
+            self.assertIsNone(evaluate.call_args.kwargs["denoise_settings"])
+            self.assertEqual(evaluate.call_args.kwargs["conditions"].preset, "medium")
+            self.assertIn("keyint=200", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
+            self.assertIn("ref=6", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
+            self.assertIn("bframes=8", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
+            self.assertIn("rc-lookahead=90", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
+
+    def test_run_multi_encode_outputs_h264_native_and_fixed_hevc(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_path = root / "input.mp4"
             input_path.write_bytes(b"input")
             toolchain = Toolchain(root / "ffmpeg", root / "ffprobe", root / "vmaf.json")
             input_info = video(input_path)
-            short_ref = reference(root / "short.mkv", 12.0)
             full_ref = reference(root / "full.mkv", 60.0)
-            modes = []
-
-            class FakeROI:
-                def validate_input(self, width, height):
-                    self.resolution = (width, height)
-
-            def fake_composite(**kwargs):
-                strategy = kwargs["strategy"]
-                modes.append(strategy.public_mode)
-                if strategy.budget_reference:
-                    self.assertEqual(
-                        kwargs["budget_reference"]["strategy_id"],
-                        "generic_no_roi",
-                    )
-                return {
-                    "strategy_id": strategy.strategy_id,
-                    "title": strategy.title,
-                    "mode": strategy.public_mode,
-                    "status": "completed",
-                    "average_video_packet_bitrate_bps": 400_000.0,
-                    "saving_vs_default_pct": None,
-                    "target_saving_min_pct": None,
-                    "target_saving_max_pct": None,
-                    "target_saving_met": None,
-                    "saving_target_status": "not_applicable",
-                }
 
             def fake_writer(output_dir, payload):
                 return payload
@@ -575,24 +655,28 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                 "hevc_lab.multi_encode.probe_video",
                 return_value=input_info,
             ), patch(
-                "hevc_lab.multi_encode.load_roi_settings",
-                return_value=FakeROI(),
-            ), patch(
                 "hevc_lab.multi_encode.prepare_reference",
-                side_effect=[short_ref, full_ref],
+                return_value=full_ref,
             ), patch(
-                "hevc_lab.multi_encode._default_strategy",
+                "hevc_lab.multi_encode._h264_native_strategy",
                 return_value={
-                    "strategy_id": "default_x265",
-                    "title": "x265原生默认",
-                    "mode": None,
+                    "strategy_id": "default_h264",
+                    "title": "H.264 原生编码",
+                    "mode": "h264_native",
                     "status": "completed",
                     "average_video_packet_bitrate_bps": 500_000.0,
                     "saving_vs_default_pct": None,
                 },
             ), patch(
-                "hevc_lab.multi_encode._composite_strategy",
-                side_effect=fake_composite,
+                "hevc_lab.multi_encode._fixed_hevc_strategy",
+                return_value={
+                    "strategy_id": "hevc_fixed",
+                    "title": "H.265 固定参数方案",
+                    "mode": "hevc_fixed",
+                    "status": "completed",
+                    "average_video_packet_bitrate_bps": 300_000.0,
+                    "saving_vs_default_pct": 40.0,
+                },
             ), patch(
                 "hevc_lab.multi_encode.write_multi_encode_reports",
                 side_effect=fake_writer,
@@ -604,29 +688,23 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                     root / "out",
                 )
             self.assertEqual(
-                modes,
-                [
-                    "general",
-                    "roi",
-                    "roi_denoise",
-                ],
-            )
-            self.assertEqual(
                 [item["strategy_id"] for item in payload["strategies"]],
                 [
-                    "default_x265",
-                    "generic_no_roi",
-                    "budget_neutral_roi",
-                    "roi_denoise_experimental",
+                    "default_h264",
+                    "hevc_fixed",
                 ],
             )
+            self.assertEqual(payload["pipeline_version"], "v1.6.0")
+            self.assertEqual(payload["comparison_policy"]["default_strategy_id"], "default_h264")
+            self.assertFalse(payload["comparison_policy"]["roi_enabled"])
 
 
 class MultiEncodeReportTests(unittest.TestCase):
-    def test_final_report_has_four_rows_and_preserves_negative_saving(self):
+    def test_final_report_has_two_rows_and_preserves_negative_saving(self):
         strategies = [
             {
-                "title": "x265原生默认",
+                "title": "H.264 原生编码",
+                "strategy_id": "default_h264",
                 "status": "completed",
                 "resolution": "1920x1080",
                 "average_video_packet_bitrate_bps": 500_000.0,
@@ -635,55 +713,22 @@ class MultiEncodeReportTests(unittest.TestCase):
                 "target_saving_max_pct": None,
                 "target_saving_met": None,
                 "saving_target_status": "not_applicable",
-                "selection_reason": "default_x265_reference",
+                "selection_reason": "h264_native_reference",
             },
             {
-                "title": "通用无 ROI 方案",
-                "strategy_id": "generic_no_roi",
+                "title": "H.265 固定参数方案",
+                "strategy_id": "hevc_fixed",
                 "status": "completed",
                 "resolution": "1920x1080",
-                "average_video_packet_bitrate_bps": 450_000.0,
-                "selected_crf": 38.5,
+                "average_video_packet_bitrate_bps": 600_000.0,
+                "selected_crf": 36.0,
                 "vmaf_mean": 85.0,
                 "vmaf_p5": 82.0,
                 "ssim": 0.960,
                 "encode_speed_x": 0.65,
-                "saving_vs_default_pct": 10.0,
-                "saving_vs_general_no_roi_pct": 0.0,
-            },
-            {
-                "title": "预算中性 ROI 方案",
-                "strategy_id": "budget_neutral_roi",
-                "status": "completed",
-                "resolution": "1920x1080",
-                "average_video_packet_bitrate_bps": 500_000.0,
-                "selected_crf": 41.0,
-                "vmaf_mean": 84.0,
-                "vmaf_p5": 81.0,
-                "ssim": 0.955,
-                "encode_speed_x": 0.55,
-                "saving_vs_default_pct": 0.0,
-                "saving_vs_general_no_roi_pct": -11.11,
-                "budget_neutral_pass": False,
-                "roi_quality_preserved": True,
-                "roi_quality_improved": False,
-            },
-            {
-                "title": "ROI + 降噪实验项",
-                "strategy_id": "roi_denoise_experimental",
-                "status": "failed",
-                "failure_reason": "ROI 候选平均视频包码率超过通用无 ROI 预算",
-                "resolution": None,
-                "average_video_packet_bitrate_bps": None,
-                "attempted_average_video_packet_bitrate_bps": 550_000.0,
-                "selected_crf": 43.5,
-                "vmaf_mean": 83.0,
-                "vmaf_p5": 80.0,
-                "ssim": 0.950,
-                "encode_speed_x": 0.45,
-                "saving_vs_default_pct": None,
-                "saving_vs_general_no_roi_pct": -22.22,
-                "budget_neutral_pass": False,
+                "saving_vs_default_pct": -20.0,
+                "saving_vs_general_no_roi_pct": None,
+                "budget_neutral_pass": None,
                 "roi_quality_preserved": None,
                 "roi_quality_improved": None,
             },
@@ -700,16 +745,17 @@ class MultiEncodeReportTests(unittest.TestCase):
                 (root / "research_manifest.json").read_text(encoding="utf-8")
             )
             summary = (root / "final_summary.md").read_text(encoding="utf-8")
-        self.assertEqual(len(rows), 4)
-        self.assertEqual(rows[-1]["budget_neutral_pass"], "否")
-        self.assertEqual(rows[2]["saving_vs_general_no_roi_pct"], "-11.11")
-        self.assertEqual(rows[1]["selected_crf"], "38.5")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["saving_vs_default_pct"], "-20.00")
+        self.assertEqual(rows[1]["saving_vs_general_no_roi_pct"], "")
+        self.assertEqual(rows[1]["selected_crf"], "36.0")
         self.assertEqual(rows[1]["vmaf_mean"], "85.000")
         self.assertEqual(rows[1]["ssim"], "0.960000")
-        self.assertEqual(len(manifest["strategies"]), 4)
-        self.assertIn("V1.4 预算中性 ROI", summary)
-        self.assertIn("-11.11%", summary)
-        self.assertIn("尝试码率 0.550000 Mbit/s", summary)
+        self.assertEqual(len(manifest["strategies"]), 2)
+        self.assertIn("V1.6 H.264 原生编码与 H.265 固定参数方案", summary)
+        self.assertIn("-20.00%", summary)
+        self.assertIn("CRF 36.0", summary)
+        self.assertIn("无 ROI、无降噪", summary)
         self.assertNotIn("推荐方案", summary)
         self.assertIn("不输出部署结论", summary)
 

@@ -25,7 +25,7 @@ from .streams import (
 )
 
 
-FRONTEND_ROOT = PROJECT_ROOT / "apps" / "demo_live"
+FRONTEND_ROOT = PROJECT_ROOT / "apps" / "web"
 DEFAULT_JOBS_ROOT = PROJECT_ROOT / "work" / "web_jobs"
 DEFAULT_STREAMS_ROOT = PROJECT_ROOT / "work" / "live_streams"
 DEFAULT_ROI_CONFIG = PROJECT_ROOT / "configs" / "camera-entrance-roi.json"
@@ -61,7 +61,7 @@ def create_app(
                 active_stream_manager.close()
 
     app = FastAPI(
-        title="H.265 四路编码本地验证台",
+        title="V1.6 两路编码本地验证台",
         version="1.0.0",
         lifespan=lifespan,
     )
@@ -84,11 +84,12 @@ def create_app(
             "stages": WEB_STAGE_ORDER,
             "live_preview": {
                 "enabled": True,
-                "protocol": "dual RTSP camera streams to HLS preview",
+                "protocol": "single RTSP decode to native H.264/H.265 encoders and equivalent H.264 previews",
                 "playlist": HLS_PLAYLIST,
-                "variants": ["source", "conservative"],
-                "frontend": "apps/demo_live",
-                "saving_basis": "camera_input_packet_bitrate",
+                "variants": ["h264_native", "h265_optimized"],
+                "frontend": "apps/web",
+                "preview_codec": "h264",
+                "saving_basis": "native_elementary_stream_bytes_rolling_30s",
             },
         }
 
@@ -167,9 +168,7 @@ def create_app(
         source_rtsp_url = payload.get("source_rtsp_url") or payload.get("rtsp_url") or ""
         conservative_rtsp_url = payload.get("conservative_rtsp_url")
         if not source_rtsp_url:
-            raise HTTPException(status_code=400, detail="请输入原生 H.264 RTSP 地址")
-        if "rtsp_url" not in payload and not conservative_rtsp_url:
-            raise HTTPException(status_code=400, detail="请输入 H.265 保守策略 RTSP 地址")
+            raise HTTPException(status_code=400, detail="请输入原始 RTSP 地址")
         try:
             return active_stream_manager.create_stream(
                 source_rtsp_url,
@@ -194,6 +193,20 @@ def create_app(
         except StreamNotFound:
             raise HTTPException(status_code=404, detail="拉流任务不存在")
 
+    @app.post("/api/streams/{stream_id}/heartbeat")
+    def heartbeat_stream(stream_id: str):
+        try:
+            return active_stream_manager.heartbeat(stream_id)
+        except StreamNotFound:
+            raise HTTPException(status_code=404, detail="拉流任务不存在")
+
+    @app.post("/api/streams/{stream_id}/stop")
+    def stop_stream_from_page(stream_id: str):
+        try:
+            return active_stream_manager.stop_stream(stream_id, "网页已关闭，实时编码已停止")
+        except StreamNotFound:
+            raise HTTPException(status_code=404, detail="拉流任务不存在")
+
     @app.get("/api/streams/{stream_id}/hls/{filename:path}")
     def hls_file(stream_id: str, filename: str):
         try:
@@ -202,11 +215,11 @@ def create_app(
             raise HTTPException(status_code=404, detail="HLS 文件尚未生成")
         except StreamNotFound:
             raise HTTPException(status_code=404, detail="HLS 文件不存在")
-        media_type = (
-            "application/vnd.apple.mpegurl"
-            if path.suffix.lower() == ".m3u8"
-            else "video/mp2t"
-        )
+        suffix = path.suffix.lower()
+        if suffix == ".m3u8":
+            media_type = "application/vnd.apple.mpegurl"
+        else:
+            media_type = "video/mp2t"
         return FileResponse(path, media_type=media_type)
 
     app.mount(

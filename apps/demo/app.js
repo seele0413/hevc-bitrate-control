@@ -16,10 +16,7 @@ const els = {
   baseResolution: document.querySelector("#baseResolution"),
   baseBitrate: document.querySelector("#baseBitrate"),
   baseCrf: document.querySelector("#baseCrf"),
-  oursName: document.querySelector("#oursName"),
-  oursResolution: document.querySelector("#oursResolution"),
-  oursBitrate: document.querySelector("#oursBitrate"),
-  oursCrf: document.querySelector("#oursCrf"),
+  oursLabel: document.querySelector("#oursLabel"),
   savingBadge: document.querySelector("#savingBadge"),
   controls: document.querySelector("#controls"),
   playBtn: document.querySelector("#playBtn"),
@@ -114,8 +111,8 @@ function updateProgress() {
 
 function renderDownloads() {
   const links = [
-    { href: data.baseline.hevcDownload, label: "下载默认 H.265" },
-    { href: data.ours.hevcDownload, label: "下载保守 H.265" },
+    { href: data.baseline.hevcDownload, label: "下载 H.264 原生预览" },
+    { href: data.ours.hevcDownload, label: "下载 H.265 固定参数" },
     { href: data.metricsDownload, label: "下载指标 CSV" },
   ];
   els.downloadMenu.innerHTML = links
@@ -143,10 +140,7 @@ function render() {
   els.baseBitrate.textContent = fmtBitrate(data.baseline.bitrateMbps);
   els.baseCrf.textContent = fmtCrf(data.baseline.crf);
 
-  els.oursName.textContent = data.ours.displayName;
-  els.oursResolution.textContent = data.ours.resolution;
-  els.oursBitrate.textContent = fmtBitrate(data.ours.bitrateMbps);
-  els.oursCrf.textContent = fmtCrf(data.ours.crf);
+  els.oursLabel.textContent = data.ours.params;
   els.savingBadge.textContent = `${data.ours.savingVsDefaultPct.toFixed(2)}%`;
   els.metricsText.textContent =
     `VMAF ${data.ours.vmaf.toFixed(3)} · P5 ${data.ours.vmafP5.toFixed(3)} · ` +

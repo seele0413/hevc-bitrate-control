@@ -33,10 +33,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     multi_encode = subparsers.add_parser(
         "multi-encode",
-        help="生成 x265 默认、通用无 ROI、预算中性 ROI 和 ROI+降噪实验项",
+        help="生成 V1.6 H.264 原生编码和 H.265 固定参数方案",
     )
     multi_encode.add_argument("--input", type=Path, required=True)
-    multi_encode.add_argument("--roi-config", type=Path, required=True)
+    multi_encode.add_argument(
+        "--roi-config",
+        type=Path,
+        default=Path("configs/camera-entrance-roi.json"),
+        help="兼容旧命令的可选参数；V1.6 正式流程不读取 ROI 配置",
+    )
     multi_encode.add_argument("--output", type=Path, required=True)
 
     web = subparsers.add_parser("web", help="启动本机 Web 界面")
@@ -315,7 +320,7 @@ def main(argv=None) -> int:
                 roi_config_path=args.roi_config,
                 output_dir=args.output,
             )
-            print("V1.4 四路编码完成：")
+            print("V1.6 两路编码完成：")
             for strategy in payload["strategies"]:
                 if strategy["status"] != "completed":
                     print(
@@ -326,14 +331,9 @@ def main(argv=None) -> int:
                 bitrate = strategy["average_video_packet_bitrate_mbps"]
                 saving = strategy.get("saving_vs_default_pct")
                 saving_text = "—" if saving is None else f"{saving:.2f}%"
-                general_saving = strategy.get("saving_vs_general_no_roi_pct")
-                general_text = (
-                    "—" if general_saving is None else f"{general_saving:.2f}%"
-                )
                 print(
                     f"- {strategy['title']}：{strategy['resolution']}，"
-                    f"{bitrate:.6f} Mbit/s，相对默认节省 {saving_text}，"
-                    f"相对通用节省 {general_text}"
+                    f"{bitrate:.6f} Mbit/s，相对 H.264 原生节省 {saving_text}"
                 )
             print(f"结果目录：{args.output.expanduser().resolve()}")
             return 0

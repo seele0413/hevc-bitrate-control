@@ -1,4 +1,4 @@
-"""本地四路编码验证台。"""
+"""本地 V1.6 两路编码验证台。"""
 
 from pathlib import Path
 import sys

@@ -1,5 +1,3 @@
-﻿strategy,resolution,average_video_packet_bitrate_bps,average_video_packet_bitrate_mbps,selected_crf,vmaf_mean,vmaf_p5,ssim,encode_speed_x,saving_vs_default_pct,saving_vs_general_no_roi_pct,budget_neutral_pass,roi_quality_preserved,roi_quality_improved
-x265原生默认,1920x1080,770572.800000,0.770573,,,,,,,,,,
-通用无 ROI 方案,1920x1080,298019.866667,0.298020,36.0,85.019,81.445,0.977667,1.711,61.32,0.00,,,
-预算中性 ROI 方案,,,,38.0,84.417,81.612,0.974482,1.809,,-16.22,否,,
-ROI + 降噪实验项,,,,38.0,84.256,81.298,0.974319,1.481,,-16.97,否,,
+strategy,resolution,average_video_packet_bitrate_bps,average_video_packet_bitrate_mbps,selected_crf,vmaf_mean,vmaf_p5,ssim,encode_speed_x,saving_vs_default_pct,saving_vs_general_no_roi_pct,budget_neutral_pass,roi_quality_preserved,roi_quality_improved
+H.264 原生编码,1920x1080,770572.800000,0.770573,,,,,,,,,,
+H.265 固定参数方案,1920x1080,298019.866667,0.298020,36.0,85.019,81.445,0.977667,1.711,61.32,,,,

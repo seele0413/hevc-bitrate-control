@@ -3,108 +3,100 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>H.265 RTSP 实时预览</title>
+    <title>V1.6 RTSP 实时双路编码</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/styles.css?v=1.5.0" />
+    <link rel="stylesheet" href="/styles.css?v=1.6.0-live2" />
   </head>
   <body>
     <main class="card">
       <header>
-        <h1>H.265 实时监控预览</h1>
-        <p class="subtitle">RTSP 实时流 · 本地 FFmpeg 转 HLS 播放</p>
+        <h1>RTSP 实时双路编码</h1>
+        <p class="subtitle">H.264 原生参数编码 / H265编码参数优化 · V1.6</p>
       </header>
 
-      <nav class="strategy-tabs" role="tablist" aria-label="方案类型">
-        <button class="strategy-tab active" type="button" data-target="generic" role="tab" aria-selected="true">
-          <span class="tab-title">通用</span>
-          <span class="tab-desc">RTSP 实时预览</span>
-        </button>
-        <button class="strategy-tab" type="button" data-target="specialized" role="tab" aria-selected="false">
-          <span class="tab-title">专用</span>
-          <span class="tab-desc">ROI / 降噪 / 编码策略待接入</span>
-        </button>
-      </nav>
+      <form class="stream-form" id="streamForm">
+        <input
+          id="rtspInput"
+          class="rtsp-input"
+          type="password"
+          inputmode="url"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="rtsp://user:password@camera-ip/stream"
+          aria-label="原始 RTSP 地址"
+          required
+        />
+        <button class="primary-btn" id="startBtn" type="submit">启动</button>
+        <button class="secondary-btn" id="stopBtn" type="button" disabled>停止</button>
+      </form>
 
-      <section class="viewer" id="viewerGeneric">
-        <div class="stage" id="liveStage">
-          <video class="media" id="liveVideo" playsinline controls muted></video>
+      <section class="stage" id="stage" aria-label="实时编码对比画面">
+        <video class="media base" id="h264Video" playsinline muted autoplay></video>
+        <video class="media ours" id="h265Video" playsinline muted autoplay></video>
 
-          <div class="label source">
-            <div class="name">实时监控</div>
-            <div>Source: <span id="sourceText">--</span></div>
-            <div>HLS: <span class="hl" id="hlsText">未生成</span></div>
-          </div>
+        <div class="label base">
+          <div class="name">H.264 原生参数编码</div>
+          <div>Resolution: <span id="h264Resolution">--</span></div>
+          <div>Bitrate: <span class="hl" id="h264Bitrate">--</span></div>
+          <div>CRF: <span id="h264Crf">原生默认</span></div>
+          <div>Latency: <span id="h264Latency">--</span></div>
+        </div>
 
-          <div class="label status">
-            <div class="name" id="statusName">未启动</div>
-            <div>Stream: <span id="streamText">--</span></div>
-            <div>State: <span class="hl" id="stateText">idle</span></div>
-          </div>
+        <div class="label ours">
+          <div class="name">H265编码参数优化</div>
+          <div>Resolution: <span id="h265Resolution">--</span></div>
+          <div>Bitrate: <span class="hl" id="h265Bitrate">--</span></div>
+          <div>CRF: <span id="h265Crf">36.0</span></div>
+          <div>Latency: <span id="h265Latency">--</span></div>
+        </div>
 
-          <div class="live-empty" id="liveEmpty">
-            <div class="empty-title">等待 RTSP 流</div>
-            <div class="empty-desc">输入地址并启动后，这里显示实时监控画面。</div>
+        <div class="divider" id="divider" tabindex="0" role="slider" aria-label="对比分割线" aria-valuenow="50" aria-valuemin="0" aria-valuemax="100">
+          <div class="badge">
+            <span class="small">码率差</span>
+            <span class="big" id="savingBadge">--</span>
           </div>
         </div>
 
-        <form class="rtsp-form" id="rtspForm">
-          <input id="rtspUrl" type="password" autocomplete="off" placeholder="rtsp://user:password@camera-ip/stream" />
-          <button class="primary-btn" id="startStream" type="submit">开始拉流</button>
-          <button class="secondary-btn" id="stopStream" type="button" disabled>停止</button>
-        </form>
-
-        <div class="metrics" id="liveMetrics">
-          <span>状态：<strong id="liveStatusBadge">未启动</strong></span>
-          <span>地址：<strong id="maskedUrlText">--</strong></span>
-          <span>日志：<strong id="logText">--</strong></span>
-        </div>
-        <p class="load-error" id="liveErrorText" hidden></p>
-      </section>
-
-      <section class="viewer" id="viewerSpecialized" hidden>
-        <div class="placeholder-box">
-          <svg class="icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
-            <circle cx="12" cy="13" r="4"></circle>
-          </svg>
-          <div class="title">专用方案对比待补充</div>
-          <div class="desc">后续接入 ROI、降噪或实时编码策略后，在这里展示专用场景对比结果。</div>
+        <div class="empty" id="emptyState">
+          <div class="empty-title">等待 RTSP</div>
+          <div class="empty-desc">启动后显示两路实时编码预览</div>
         </div>
       </section>
 
-      <details class="offline-panel">
-        <summary>离线编码实验</summary>
-        <div class="offline-body">
-          <section class="uploader" aria-label="创建编码任务">
-            <label class="file-picker">
-              <span id="fileName">选择 MP4 / MKV 视频</span>
-              <input id="videoFile" type="file" accept=".mp4,.mkv,video/mp4,video/x-matroska" />
-            </label>
-            <button id="createJob" type="button">开始编码</button>
-          </section>
+      <div class="controls" id="controls">
+        <button class="ctrl-btn" id="playBtn" type="button" aria-label="播放 / 暂停" disabled>
+          <svg class="icon-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>
+          <svg class="icon-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"></path></svg>
+        </button>
+        <div class="live-chip" id="liveChip">未连接</div>
+        <div class="time" id="timeLabel">HLS: --</div>
+      </div>
 
-          <section class="status-panel" aria-live="polite">
-            <div class="status-copy">
-              <span id="statusBadge" class="status-badge">等待上传</span>
-              <span id="statusText">选择一个本地视频后创建任务。</span>
-            </div>
-            <div class="progress-track">
-              <div id="progressFill" class="progress-fill"></div>
-            </div>
-            <p id="errorText" class="load-error" hidden></p>
-          </section>
+      <p class="preview-note">画面为两路原生编码结果的等价 H.264 预览，码率统计来自预览转码之前。</p>
 
-          <section id="resultsPanel" class="results-panel" hidden>
-            <div id="metricGrid" class="metric-grid"></div>
-            <div id="downloadGrid" class="download-grid"></div>
-          </section>
+      <section class="metrics-grid" aria-label="实时状态">
+        <div>
+          <span class="metric-label">流状态</span>
+          <strong id="streamStatus">idle</strong>
         </div>
-      </details>
+        <div>
+          <span class="metric-label">RTSP 地址</span>
+          <strong id="maskedUrl">--</strong>
+        </div>
+        <div>
+          <span class="metric-label">输出状态</span>
+          <strong id="outputStatus">--</strong>
+        </div>
+        <div>
+          <span class="metric-label">FFmpeg</span>
+          <strong id="errorText">--</strong>
+        </div>
+      </section>
 
       <p class="load-error" id="runtimeError" hidden></p>
     </main>
 
     <script src="/vendor/hls.min.js?v=1.5.17" defer></script>
-    <script src="/app.js?v=1.5.0" defer></script>
+    <script src="/app.js?v=1.6.0-live2" defer></script>
   </body>
 </html>
