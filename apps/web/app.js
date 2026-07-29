@@ -405,7 +405,7 @@ async function checkRuntime() {
     const runtime = await fetchJson("/api/runtime", { cache: "no-store" });
     const variants = runtime.live_preview?.variants || [];
     if (
-      runtime.pipeline_version !== "v1.7.0" ||
+      runtime.pipeline_version !== "v1.8.0" ||
       runtime.live_preview?.frontend !== "apps/web" ||
       runtime.live_preview?.preview_codec !== "h264" ||
       !variants.includes("h264_native") ||

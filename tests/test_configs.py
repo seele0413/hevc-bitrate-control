@@ -169,7 +169,7 @@ class InterConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             [item.effective_preset for item in strategies],
-            ["medium"],
+            ["fast"],
         )
         self.assertEqual(
             [item.crf_search_max for item in strategies],

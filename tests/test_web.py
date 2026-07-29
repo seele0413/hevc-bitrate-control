@@ -83,7 +83,7 @@ def write_fake_payload(output_dir: Path) -> Dict:
         (output_dir / report).write_text("report", encoding="utf-8")
     return {
         "schema_version": 6,
-        "pipeline_version": "v1.7.0",
+        "pipeline_version": "v1.8.0",
         "study": "test",
         "input": {
             "path": str(output_dir / "input.mp4"),
@@ -188,8 +188,8 @@ class WebApiTests(unittest.TestCase):
 
         with self.make_client(runner) as client:
             runtime = client.get("/api/runtime").json()
-        self.assertEqual(runtime["pipeline_version"], "v1.7.0")
-        self.assertEqual(runtime["app_version"], "1.7.0")
+        self.assertEqual(runtime["pipeline_version"], "v1.8.0")
+        self.assertEqual(runtime["app_version"], "1.8.0")
         self.assertEqual(
             runtime["strategy_ids"],
             [
@@ -320,7 +320,7 @@ class LiveStreamManagerTests(unittest.TestCase):
             self.assertNotIn("-preset", h264_encoder)
             self.assertNotIn("-tune", h264_encoder)
             self.assertIn("libx265", h265_encoder)
-            self.assertIn("-preset medium", " ".join(h265_encoder))
+            self.assertIn("-preset fast", " ".join(h265_encoder))
             self.assertIn("-crf 36.0", " ".join(h265_encoder))
             self.assertIn("ref=4", " ".join(h265_encoder))
             self.assertIn("bframes=4", " ".join(h265_encoder))

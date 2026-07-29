@@ -1,10 +1,10 @@
-# H.265 V1.7 开发任务
+# H.265 V1.8 开发任务
 
 最后更新：2026-07-28
 
 ## 当前状态
 
-v1.6.0 当前正式入口只输出两路结果：`default_h264.mp4` 和 `hevc_fixed.mp4`。H.264 原生编码只指定 `libx264`；H.265 固定参数方案使用 `CRF 36.0 · preset medium · GOP 2-10s · ref 4 · b-frames 4 · lookahead 45 · 无roi · 无降噪`。
+v1.6.0 当前正式入口只输出两路结果：`default_h264.mp4` 和 `hevc_fixed.mp4`。H.264 原生编码只指定 `libx264`；H.265 固定参数方案使用 `CRF 36.0 · preset fast · GOP 2-10s · ref 4 · b-frames 4 · lookahead 45 · 无roi · 无降噪`。
 
 V1.6 不做 CRF 搜索、不使用 ROI、不使用降噪、不评选胜出方案、不生成部署结论。旧 V1.4 预算中性 ROI 和旧四路输出均降级为历史研究内容。
 

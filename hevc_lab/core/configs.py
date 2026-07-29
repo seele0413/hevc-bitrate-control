@@ -45,12 +45,12 @@ def multi_encode_strategies() -> Tuple[MultiEncodeStrategy, ...]:
             strategy_id="hevc_fixed",
             title="H.265 固定参数方案",
             description=(
-                "CRF 36.0、preset medium、GOP 2-10s、ref 4、b-frames 4、"
+                "CRF 36.0、preset fast、GOP 2-10s、ref 4、b-frames 4、"
                 "lookahead 45；无 ROI、无降噪。"
             ),
             source_mode="aggressive",
             strategy_generation="v1.6_fixed_hevc_no_roi_no_denoise",
-            effective_preset="medium",
+            effective_preset="fast",
             roi_enabled=False,
             denoise_enabled=False,
             target_vmaf=83.0,

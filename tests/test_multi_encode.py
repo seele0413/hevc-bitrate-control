@@ -626,14 +626,14 @@ class MultiEncodeDecisionTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["strategy_id"], "hevc_fixed")
             self.assertEqual(result["selected_crf"], 36.0)
-            self.assertEqual(result["effective_preset"], "medium")
+            self.assertEqual(result["effective_preset"], "fast")
             self.assertFalse(result["roi_enabled"])
             self.assertFalse(result["denoise_enabled"])
             self.assertEqual(stages, ["encoding_hevc_fixed"])
             self.assertEqual(evaluate.call_args.kwargs["crf"], 36.0)
             self.assertIsNone(evaluate.call_args.kwargs["roi_settings"])
             self.assertIsNone(evaluate.call_args.kwargs["denoise_settings"])
-            self.assertEqual(evaluate.call_args.kwargs["conditions"].preset, "medium")
+            self.assertEqual(evaluate.call_args.kwargs["conditions"].preset, "fast")
             self.assertIn("keyint=200", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
             self.assertIn("ref=4", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
             self.assertIn("bframes=4", evaluate.call_args.kwargs["scheme"].x265_params(20.0))
@@ -694,7 +694,7 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                     "hevc_fixed",
                 ],
             )
-            self.assertEqual(payload["pipeline_version"], "v1.7.0")
+            self.assertEqual(payload["pipeline_version"], "v1.8.0")
             self.assertEqual(payload["comparison_policy"]["default_strategy_id"], "default_h264")
             self.assertFalse(payload["comparison_policy"]["roi_enabled"])
 
