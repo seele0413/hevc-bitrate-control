@@ -1,6 +1,6 @@
-# H.264 原生编码与 V1.8 H.265 固定参数研究工具
+# H.264 原生编码与 V1.9 H.265 固定参数研究工具
 
-当前版本为 **v1.8.0**。正式入口 `multi-encode` 只生成两路结果：
+当前版本为 **v1.9.0**。正式入口 `multi-encode` 只生成两路结果：
 
 - `default_h264.mp4`：只指定 `libx264`，保留 FFmpeg/libx264 原生默认参数。
 - `hevc_fixed.mp4`：固定 H.265 参数方案，参数为 `CRF 36.0 · preset fast · GOP 2-10s · ref 4 · b-frames 4 · lookahead 45 · 无roi · 无降噪`。

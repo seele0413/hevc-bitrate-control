@@ -694,7 +694,7 @@ class MultiEncodeDecisionTests(unittest.TestCase):
                     "hevc_fixed",
                 ],
             )
-            self.assertEqual(payload["pipeline_version"], "v1.8.0")
+            self.assertEqual(payload["pipeline_version"], "v1.9.0")
             self.assertEqual(payload["comparison_policy"]["default_strategy_id"], "default_h264")
             self.assertFalse(payload["comparison_policy"]["roi_enabled"])
 

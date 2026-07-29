@@ -73,9 +73,9 @@ class LiveDemoTests(unittest.TestCase):
         self.assertIn('preview_codec !== "h264"', script)
         self.assertIn("recoverMediaError", script)
         self.assertIn("startLoad", script)
-        self.assertIn("STARTUP_BUFFER_SECONDS = 5", script)
-        self.assertIn("HARD_SYNC_THRESHOLD_SECONDS = 3", script)
-        self.assertIn("liveSyncDurationCount: 5", script)
+        self.assertNotIn("STARTUP_BUFFER_SECONDS", script)
+        self.assertIn("HARD_SYNC_THRESHOLD_SECONDS = 0.5", script)
+        self.assertIn("liveSyncDurationCount: 2", script)
         self.assertNotIn("autoplay></video>", index)
         self.assertTrue((DEMO_LIVE_ROOT / "vendor" / "hls.min.js").exists())
 

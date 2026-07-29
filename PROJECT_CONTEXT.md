@@ -20,9 +20,9 @@ V1.6 不做 CRF 搜索、不使用 ROI、不使用分区降噪、不评选胜出
 
 ## 当前代码状态
 
-- `hevc_lab/__init__.py` 与 `pyproject.toml` 版本为 `1.8.0`。
+- `hevc_lab/__init__.py` 与 `pyproject.toml` 版本为 `1.9.0`。
 - `hevc_lab/core/configs.py` 的正式 `multi_encode_strategies()` 只返回 `hevc_fixed` 一个 H.265 固定参数方案；`multi_encode_modes()` 返回 `h264_native` 与 `hevc_fixed`。
-- `hevc_lab/multi_encode.py` 的 `MULTI_ENCODE_PIPELINE_VERSION` 为 `v1.8.0`，正式流程先生成 H.264 原生编码，再生成 H.265 固定参数方案。
+- `hevc_lab/multi_encode.py` 的 `MULTI_ENCODE_PIPELINE_VERSION` 为 `v1.9.0`，正式流程先生成 H.264 原生编码，再生成 H.265 固定参数方案。
 - `hevc_lab/encoders/x265.py` 同时保留 `encode_default_x265()` 历史函数和 `encode_default_h264()` V1.6 函数。
 - `hevc_lab/reports/multi_writer.py` 输出 V1.6 两路摘要，不评选最佳方案，不输出部署结论。
 - 本地 Web 首页挂载 `apps/web`；静态 Cloudflare Pages 展示版位于 `apps/demo`。
