@@ -61,7 +61,7 @@ def create_app(
                 active_stream_manager.close()
 
     app = FastAPI(
-    title="V1.9 两路编码本地验证台",
+    title="V2.0 两路编码本地验证台",
         version="1.0.0",
         lifespan=lifespan,
     )
@@ -182,7 +182,7 @@ def create_app(
     @app.get("/api/streams/{stream_id}")
     def get_stream(stream_id: str):
         try:
-            return active_stream_manager.get_status(stream_id)
+            return active_stream_manager.heartbeat(stream_id)
         except StreamNotFound:
             raise HTTPException(status_code=404, detail="拉流任务不存在")
 

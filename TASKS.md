@@ -1,4 +1,4 @@
-# H.265 V1.9 开发任务
+# H.265 V2.0 开发任务
 
 最后更新：2026-07-28
 
@@ -22,6 +22,7 @@ V1.6 不做 CRF 搜索、不使用 ROI、不使用降噪、不评选胜出方案
 - [x] 在预览转码前统计 H.264/H.265 原生编码字节，并按最近 30 秒窗口计算实时码率和节省率。
 - [x] 将两路原生码流分别解码后，用同一套 H.264 低延迟参数生成浏览器等价预览，移除浏览器 HEVC fMP4/HLS 依赖。
 - [x] 新增两路约 5 秒缓冲后共同起播、`0.98-1.02x` 软同步、超过 3 秒才硬校正、2 秒页面心跳、页面关闭停止信标和后端 10 秒租约回收。
+- [x] V2.0 保持 2 帧队列满时丢弃旧帧；状态轮询、HLS 请求和独立心跳共同续租，租约容错提高到 30 秒；播放器致命错误后允许重新连接。
 - [x] 移除实时 FFmpeg 的隐藏窗口标志，服务退出、页面停止或租约超时时统一回收整组子进程。
 
 ## 待完成
@@ -36,7 +37,7 @@ V1.6 不做 CRF 搜索、不使用 ROI、不使用降噪、不评选胜出方案
 - [x] Python 编译检查通过。
 - [x] `node --check` 检查 `apps/demo/app.js` 与 `apps/demo_live/app.js` 通过。
 - [x] `apps/demo/data/results.json` JSON 语法检查通过。
-- [x] `python -m unittest discover -v` 通过，当前 132 项单元测试全部通过。
+- [x] `python -m unittest discover -v` 通过，当前 133 项单元测试全部通过。
 - [x] 合成 320x180@10fps 运动源通过完整实时管道，两路 H.264 HLS 预览均生成，原生 H.264/H.265 码率与节省率均可读取，停止后无残留合成测试 FFmpeg。
 - [x] Playwright 打开 `apps/demo` 本地 HTTP 页面，确认蓝色参数标签 `white-space: nowrap`、`max-width: none`，在 92% 和 98% 分割位置均超出舞台右边界并由 `.stage { overflow: hidden; }` 自然裁切。
 - [ ] 环境检查与真实端到端未通过：当前工作树缺少 `.tools/ffmpeg/bin/ffmpeg.exe` 与 `ffprobe.exe`，`python -m hevc_lab check-env` 报告缺少 `ffmpeg、ffprobe`，且没有 `samples/` 输入样本目录。

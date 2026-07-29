@@ -179,6 +179,11 @@ function updateSaving(payload) {
   els.savingBadge.textContent = Number.isFinite(saving) ? `${saving.toFixed(0)}%` : "--";
 }
 
+function clearPlaylistAttachment(key) {
+  if (key === "h264_native") h264PlaylistUrl = null;
+  if (key === "h265_optimized") h265PlaylistUrl = null;
+}
+
 function attachHls(video, url, key) {
   if (!url) return;
   if (players[key]) {
@@ -204,6 +209,7 @@ function attachHls(video, url, key) {
       }
       player.destroy();
       players[key] = null;
+      clearPlaylistAttachment(key);
     });
     player.loadSource(url);
     player.attachMedia(video);
@@ -318,6 +324,18 @@ async function fetchJson(url, options = {}) {
 
 function startPolling() {
   stopPolling();
+  const sendHeartbeat = async () => {
+    if (!streamId) return;
+    try {
+      await fetchJson(`/api/streams/${streamId}/heartbeat`, {
+        method: "POST",
+        cache: "no-store",
+      });
+    } catch (error) {
+      els.errorText.textContent = error.message;
+    }
+  };
+  sendHeartbeat();
   pollTimer = window.setInterval(async () => {
     if (!streamId) return;
     try {
@@ -332,17 +350,7 @@ function startPolling() {
     updateLatencyLabels();
     if (latestPayload) updateSaving(latestPayload);
   }, 500);
-  heartbeatTimer = window.setInterval(async () => {
-    if (!streamId) return;
-    try {
-      await fetchJson(`/api/streams/${streamId}/heartbeat`, {
-        method: "POST",
-        cache: "no-store",
-      });
-    } catch (error) {
-      els.errorText.textContent = error.message;
-    }
-  }, 2000);
+  heartbeatTimer = window.setInterval(sendHeartbeat, 2000);
 }
 
 function stopPolling() {
@@ -365,7 +373,7 @@ async function checkRuntime() {
     const runtime = await fetchJson("/api/runtime", { cache: "no-store" });
     const variants = runtime.live_preview?.variants || [];
     if (
-      runtime.pipeline_version !== "v1.9.0" ||
+      runtime.pipeline_version !== "v2.0.0" ||
       runtime.live_preview?.frontend !== "apps/web" ||
       runtime.live_preview?.preview_codec !== "h264" ||
       !variants.includes("h264_native") ||

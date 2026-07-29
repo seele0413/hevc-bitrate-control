@@ -28,7 +28,7 @@ PREVIEW_CRF = 18
 PREVIEW_PRESET = "ultrafast"
 BITRATE_WINDOW_SECONDS = 30.0
 FRAME_QUEUE_SIZE = 2
-HEARTBEAT_TIMEOUT_SECONDS = 10.0
+HEARTBEAT_TIMEOUT_SECONDS = 30.0
 
 ToolchainFactory = Callable[[], Toolchain]
 ProcessFactory = Callable[..., subprocess.Popen]
@@ -443,6 +443,7 @@ class LiveStreamManager:
             raise StreamNotFound(filename)
         with self._lock:
             stream = self._stream_locked(stream_id)
+            stream.last_heartbeat_at = time.monotonic()
             self._refresh_status_locked(stream)
             output = stream.outputs.get(variant)
             if output is None:

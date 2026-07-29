@@ -73,6 +73,7 @@ class LiveDemoTests(unittest.TestCase):
         self.assertIn('preview_codec !== "h264"', script)
         self.assertIn("recoverMediaError", script)
         self.assertIn("startLoad", script)
+        self.assertIn("clearPlaylistAttachment", script)
         self.assertNotIn("STARTUP_BUFFER_SECONDS", script)
         self.assertIn("HARD_SYNC_THRESHOLD_SECONDS = 0.5", script)
         self.assertIn("liveSyncDurationCount: 2", script)

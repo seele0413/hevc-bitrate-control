@@ -83,7 +83,7 @@ def write_fake_payload(output_dir: Path) -> Dict:
         (output_dir / report).write_text("report", encoding="utf-8")
     return {
         "schema_version": 6,
-            "pipeline_version": "v1.9.0",
+            "pipeline_version": "v2.0.0",
         "study": "test",
         "input": {
             "path": str(output_dir / "input.mp4"),
@@ -188,8 +188,8 @@ class WebApiTests(unittest.TestCase):
 
         with self.make_client(runner) as client:
             runtime = client.get("/api/runtime").json()
-        self.assertEqual(runtime["pipeline_version"], "v1.9.0")
-        self.assertEqual(runtime["app_version"], "1.9.0")
+        self.assertEqual(runtime["pipeline_version"], "v2.0.0")
+        self.assertEqual(runtime["app_version"], "2.0.0")
         self.assertEqual(
             runtime["strategy_ids"],
             [
@@ -541,6 +541,29 @@ class LiveStreamApiTests(unittest.TestCase):
             self.assertEqual(stopped.status_code, 200)
             self.assertEqual(stopped.json()["status"], "stopped")
             self.assertTrue(all(process.terminated for process in self.created_processes))
+
+    def test_stream_status_poll_and_hls_request_renew_the_lease(self):
+        with self.make_client() as client:
+            created = client.post(
+                "/api/streams",
+                json={"rtsp_url": "rtsp://127.0.0.1/live"},
+            ).json()
+            stream_id = created["stream_id"]
+            stream = self.stream_manager._streams[stream_id]
+
+            initial_heartbeat = stream.last_heartbeat_at
+            time.sleep(0.01)
+            status = client.get(f"/api/streams/{stream_id}")
+            self.assertEqual(status.status_code, 200)
+            self.assertGreater(stream.last_heartbeat_at, initial_heartbeat)
+
+            status_heartbeat = stream.last_heartbeat_at
+            time.sleep(0.01)
+            missing = client.get(
+                f"/api/streams/{stream_id}/hls/h265_optimized/live.m3u8"
+            )
+            self.assertEqual(missing.status_code, 404)
+            self.assertGreater(stream.last_heartbeat_at, status_heartbeat)
 
     def test_hls_route_blocks_path_traversal(self):
         with self.make_client() as client:

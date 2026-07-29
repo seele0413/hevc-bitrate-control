@@ -30,7 +30,7 @@ from .core.roi import important_regions
 
 
 MULTI_ENCODE_SCHEMA_VERSION = 6
-MULTI_ENCODE_PIPELINE_VERSION = "v1.9.0"
+MULTI_ENCODE_PIPELINE_VERSION = "v2.0.0"
 V1_6_HEVC_FIXED_CRF = 36.0
 SHORT_SEARCH_SECONDS = 12.0
 CRF_MIN = 18.0
@@ -1295,7 +1295,7 @@ def run_multi_encode(
     payload = {
         "schema_version": MULTI_ENCODE_SCHEMA_VERSION,
         "pipeline_version": MULTI_ENCODE_PIPELINE_VERSION,
-    "study": "V1.9 H.264 原生编码与 H.265 固定参数方案",
+    "study": "V2.0 H.264 原生编码与 H.265 固定参数方案",
         "input": input_source.to_dict(),
         "short_reference": None,
         "full_reference": full_reference.to_dict(),
