@@ -18,22 +18,26 @@ from ..config import HEVC_CONFIG
 from ..tools import Toolchain, discover_toolchain
 
 
-STREAM_PIPELINE_VERSION = "v2.1.0"
+STREAM_PIPELINE_VERSION = "v2.2.0"
 LIVE_STREAM_STATUSES = ("starting", "running", "failed", "stopped")
 LIVE_VARIANTS = ("source", "h265_optimized")
 HLS_PLAYLIST = "live.m3u8"
 HLS_SEGMENT_PATTERN = "segment_%05d.ts"
 HLS_ALLOWED_SUFFIXES = {".m3u8", ".ts"}
+HLS_SEGMENT_SECONDS = 1
+HLS_PLAYLIST_SEGMENTS = 60
 BITRATE_WINDOW_SECONDS = 30.0
 LIVE_BUFFER_SECONDS = 5.0
 LIVE_BUFFER_MAX_BYTES = 512 * 1024 * 1024
 MIN_FRAME_QUEUE_SIZE = 2
-HEARTBEAT_TIMEOUT_SECONDS = 10.0
+HEARTBEAT_TIMEOUT_SECONDS = 45.0
 SOURCE_PLAYLIST_WARNING_SECONDS = 8.0
 PROCESS_TERMINATE_TIMEOUT_SECONDS = 5.0
 THREAD_JOIN_TIMEOUT_SECONDS = 3.0
 PREVIEW_CRF = 21
 PREVIEW_PRESET = "ultrafast"
+PLAYBACK_TARGET_DELAY_SECONDS = 10.0
+PLAYBACK_RECOVERY_BUFFER_SECONDS = 3.0
 
 ToolchainFactory = Callable[[], Toolchain]
 ProcessFactory = Callable[..., subprocess.Popen]
@@ -347,6 +351,15 @@ class LiveStream:
                 "buffered_seconds": queue_seconds,
                 "capacity_seconds": capacity_seconds,
             },
+            "playback": {
+                "policy": "fixed_delay_continuity_first",
+                "target_delay_seconds": PLAYBACK_TARGET_DELAY_SECONDS,
+                "recovery_buffer_seconds": PLAYBACK_RECOVERY_BUFFER_SECONDS,
+                "hls_segment_seconds": HLS_SEGMENT_SECONDS,
+                "hls_playlist_segments": HLS_PLAYLIST_SEGMENTS,
+                "hls_retention_seconds": HLS_SEGMENT_SECONDS * HLS_PLAYLIST_SEGMENTS,
+                "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS,
+            },
             "warnings": self._current_warnings(),
             "error": self.error,
             "created_at": self.created_at,
@@ -496,6 +509,8 @@ class LiveStreamManager:
     def get_status(self, stream_id: str) -> Dict[str, Any]:
         with self._lock:
             stream = self._stream_locked(stream_id)
+            if stream.status in {"starting", "running"}:
+                stream.last_heartbeat_at = time.monotonic()
             self._refresh_status_locked(stream)
             return stream.public_status()
 
@@ -536,6 +551,8 @@ class LiveStreamManager:
             raise StreamNotFound(filename)
         with self._lock:
             stream = self._stream_locked(stream_id)
+            if stream.status in {"starting", "running"}:
+                stream.last_heartbeat_at = time.monotonic()
             self._refresh_status_locked(stream)
             output = stream.outputs[variant]
             path = (output.preview_dir / leaf).resolve()
@@ -1081,9 +1098,9 @@ class LiveStreamManager:
             "-f",
             "hls",
             "-hls_time",
-            "1",
+            str(HLS_SEGMENT_SECONDS),
             "-hls_list_size",
-            "20",
+            str(HLS_PLAYLIST_SEGMENTS),
             "-hls_flags",
             "delete_segments+omit_endlist+independent_segments",
             "-hls_segment_filename",
@@ -1189,9 +1206,9 @@ class LiveStreamManager:
             "-f",
             "hls",
             "-hls_time",
-            "1",
+            str(HLS_SEGMENT_SECONDS),
             "-hls_list_size",
-            "20",
+            str(HLS_PLAYLIST_SEGMENTS),
             "-hls_flags",
             "delete_segments+omit_endlist+independent_segments",
             "-hls_segment_filename",

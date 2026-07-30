@@ -10,8 +10,13 @@ from .. import __version__
 from ..config import HEVC_CONFIG
 from ..tools import PROJECT_ROOT
 from .streams import (
+    HEARTBEAT_TIMEOUT_SECONDS,
     HLS_PLAYLIST,
+    HLS_PLAYLIST_SEGMENTS,
+    HLS_SEGMENT_SECONDS,
     LIVE_VARIANTS,
+    PLAYBACK_RECOVERY_BUFFER_SECONDS,
+    PLAYBACK_TARGET_DELAY_SECONDS,
     STREAM_PIPELINE_VERSION,
     LiveStreamManager,
     StreamLimitExceeded,
@@ -37,6 +42,20 @@ def _rtsp_url_from_payload(payload: Dict[str, Any]) -> str:
     return rtsp_url
 
 
+def _hls_response_headers(suffix: str) -> Dict[str, str]:
+    if suffix.lower() == ".m3u8":
+        return {
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Accel-Buffering": "no",
+        }
+    return {
+        "Cache-Control": "private, max-age=120",
+        "X-Accel-Buffering": "no",
+    }
+
+
 def create_app(stream_manager: Optional[LiveStreamManager] = None) -> FastAPI:
     owns_stream_manager = stream_manager is None
     active_stream_manager = stream_manager or LiveStreamManager(
@@ -53,7 +72,7 @@ def create_app(stream_manager: Optional[LiveStreamManager] = None) -> FastAPI:
                 active_stream_manager.close()
 
     app = FastAPI(
-        title="V2.1.0 H.264 源码直流与 H.265 实时编码工具",
+        title="V2.2.0 H.264 源码直流与 H.265 实时编码工具",
         version=__version__,
         lifespan=lifespan,
     )
@@ -79,6 +98,15 @@ def create_app(stream_manager: Optional[LiveStreamManager] = None) -> FastAPI:
                 "playlist": HLS_PLAYLIST,
                 "saving_basis": SAVING_BASIS,
                 "h265_config": HEVC_CONFIG.public_dict(),
+                "playback": {
+                    "policy": "fixed_delay_continuity_first",
+                    "target_delay_seconds": PLAYBACK_TARGET_DELAY_SECONDS,
+                    "recovery_buffer_seconds": PLAYBACK_RECOVERY_BUFFER_SECONDS,
+                    "hls_segment_seconds": HLS_SEGMENT_SECONDS,
+                    "hls_playlist_segments": HLS_PLAYLIST_SEGMENTS,
+                    "hls_retention_seconds": HLS_SEGMENT_SECONDS * HLS_PLAYLIST_SEGMENTS,
+                    "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS,
+                },
             },
         }
 
@@ -139,7 +167,7 @@ def create_app(stream_manager: Optional[LiveStreamManager] = None) -> FastAPI:
         return FileResponse(
             path,
             media_type=media_type,
-            headers={"Cache-Control": "no-store"},
+            headers=_hls_response_headers(path.suffix),
         )
 
     app.mount(

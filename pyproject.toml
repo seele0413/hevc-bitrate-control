@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hevc-interframe-lab"
-version = "2.1.0"
+version = "2.2.0"
 description = "面向固定监控场景的 H.264 源码直流与 H.265 实时对比工具"
 requires-python = ">=3.9"
 dependencies = [

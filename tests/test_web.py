@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from hevc_lab.web.app import create_app
+from hevc_lab.web.app import _hls_response_headers, create_app
 from hevc_lab.web.streams import StreamNotFound
 
 
@@ -40,14 +40,26 @@ class WebApiTests(unittest.TestCase):
         self.manager = StubStreamManager()
         self.app = create_app(stream_manager=self.manager)
 
-    def test_runtime_is_v2_1_realtime_only(self):
+    def test_runtime_is_v2_2_realtime_only(self):
         with TestClient(self.app) as client:
             runtime = client.get("/api/runtime").json()
-        self.assertEqual(runtime["app_version"], "2.1.0")
-        self.assertEqual(runtime["pipeline_version"], "v2.1.0")
+        self.assertEqual(runtime["app_version"], "2.2.0")
+        self.assertEqual(runtime["pipeline_version"], "v2.2.0")
         self.assertEqual(runtime["commands"], ["check-env", "web"])
         self.assertEqual(runtime["live_preview"]["variants"], ["source", "h265_optimized"])
         self.assertEqual(runtime["live_preview"]["h265_config"]["crf"], 36.0)
+        self.assertEqual(
+            runtime["live_preview"]["playback"],
+            {
+                "policy": "fixed_delay_continuity_first",
+                "target_delay_seconds": 10.0,
+                "recovery_buffer_seconds": 3.0,
+                "hls_segment_seconds": 1,
+                "hls_playlist_segments": 60,
+                "hls_retention_seconds": 60,
+                "heartbeat_timeout_seconds": 45.0,
+            },
+        )
 
     def test_stream_create_accepts_only_rtsp_url(self):
         with TestClient(self.app) as client:
@@ -71,17 +83,31 @@ class WebApiTests(unittest.TestCase):
             any(getattr(route, "path", "").startswith(legacy_prefix) for route in self.app.routes)
         )
 
-    def test_frontend_uses_gated_startup_and_backlog_health(self):
+    def test_frontend_uses_fixed_delay_recovery_and_backlog_health(self):
         script = (PROJECT_ROOT / "apps" / "web" / "app.js").read_text(encoding="utf-8")
         page = (PROJECT_ROOT / "apps" / "web" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("const STARTUP_BUFFER_SECONDS = 3;", script)
+        self.assertIn("const PLAYBACK_TARGET_DELAY_SECONDS = 10;", script)
+        self.assertIn("const PLAYBACK_RECOVERY_BUFFER_SECONDS = 3;", script)
+        self.assertIn("const HLS_RETENTION_SECONDS = 60;", script)
         self.assertIn("const SOFT_SYNC_THRESHOLD_SECONDS = 0.15;", script)
         self.assertIn("const SYNC_GRACE_MS = 2000;", script)
         self.assertIn("const BACKLOG_TREND_WINDOW_MS = 30000;", script)
+        self.assertIn("function enterPlaybackRecovery(message)", script)
+        self.assertIn('video.addEventListener("waiting"', script)
+        self.assertIn("liveSyncDuration: PLAYBACK_TARGET_DELAY_SECONDS", script)
+        self.assertNotIn("liveSyncDurationCount", script)
         self.assertNotIn("if (sourcePlaylistUrl || h265PlaylistUrl)", script)
         self.assertIn('id="startupMessage"', page)
         self.assertIn('id="encodeState"', page)
         self.assertIn('id="backlogTrend"', page)
+
+    def test_live_playlist_is_not_cacheable_or_proxy_buffered(self):
+        playlist_headers = _hls_response_headers(".m3u8")
+        segment_headers = _hls_response_headers(".ts")
+        self.assertIn("no-store", playlist_headers["Cache-Control"])
+        self.assertEqual(playlist_headers["X-Accel-Buffering"], "no")
+        self.assertEqual(segment_headers["Cache-Control"], "private, max-age=120")
+        self.assertEqual(segment_headers["X-Accel-Buffering"], "no")
 
 
 if __name__ == "__main__":

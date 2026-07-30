@@ -12,8 +12,12 @@ from unittest.mock import patch
 from hevc_lab.config import HEVC_CONFIG
 from hevc_lab.tools import Toolchain
 from hevc_lab.web.streams import (
+    HEARTBEAT_TIMEOUT_SECONDS,
+    HLS_PLAYLIST_SEGMENTS,
     LiveStream,
     LiveStreamManager,
+    PLAYBACK_RECOVERY_BUFFER_SECONDS,
+    PLAYBACK_TARGET_DELAY_SECONDS,
     RollingBitrate,
     StreamNotFound,
     StreamOutput,
@@ -151,7 +155,15 @@ class StreamManagerTests(unittest.TestCase):
 
         self.assertEqual(source_hls[source_hls.index("-c:v") + 1], "copy")
         self.assertNotIn("libx264", source_hls)
+        self.assertEqual(
+            source_hls[source_hls.index("-hls_list_size") + 1],
+            str(HLS_PLAYLIST_SEGMENTS),
+        )
         self.assertIn("libx264", h265_preview)
+        self.assertEqual(
+            h265_preview[h265_preview.index("-hls_list_size") + 1],
+            str(HLS_PLAYLIST_SEGMENTS),
+        )
         self.assertEqual(sum(command.count("libx264") for command in commands), 1)
         self.assertEqual(h265_preview[h265_preview.index("-crf") + 1], "21")
         self.assertEqual(h265_encoder[h265_encoder.index("-preset") + 1], "fast")
@@ -169,6 +181,13 @@ class StreamManagerTests(unittest.TestCase):
             expected_params,
         )
         status = stream.public_status()
+        self.assertEqual(status["playback"]["target_delay_seconds"], PLAYBACK_TARGET_DELAY_SECONDS)
+        self.assertEqual(
+            status["playback"]["recovery_buffer_seconds"],
+            PLAYBACK_RECOVERY_BUFFER_SECONDS,
+        )
+        self.assertEqual(status["playback"]["hls_playlist_segments"], HLS_PLAYLIST_SEGMENTS)
+        self.assertEqual(status["playback"]["heartbeat_timeout_seconds"], HEARTBEAT_TIMEOUT_SECONDS)
         self.assertEqual(
             status["outputs"]["h265_optimized"]["probe"]["fixed_config"],
             HEVC_CONFIG.public_dict(10.0),
@@ -259,6 +278,20 @@ class StreamManagerTests(unittest.TestCase):
             with self.subTest(path=path):
                 with self.assertRaises(StreamNotFound):
                     self.manager.get_hls_file(stream.stream_id, path)
+
+    def test_status_and_hls_requests_renew_the_page_lease(self):
+        stream = self.create()
+        stream.last_heartbeat_at = time.monotonic() - 10
+        stale_status_lease = stream.last_heartbeat_at
+        self.manager.get_status(stream.stream_id)
+        self.assertGreater(stream.last_heartbeat_at, stale_status_lease)
+
+        playlist = stream.outputs["source"].playlist_path
+        playlist.write_text("#EXTM3U\n", encoding="ascii")
+        stream.last_heartbeat_at = time.monotonic() - 10
+        stale_hls_lease = stream.last_heartbeat_at
+        self.manager.get_hls_file(stream.stream_id, "source/live.m3u8")
+        self.assertGreater(stream.last_heartbeat_at, stale_hls_lease)
 
     def test_queue_uses_blocking_backpressure_without_drops(self):
         stream = self.create()
