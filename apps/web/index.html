@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>V2.1.0 实时源码直流</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/styles.css?v=2.1.0-ui1" />
+    <link rel="stylesheet" href="/styles.css?v=2.1.0-ui2" />
   </head>
   <body>
     <main class="workspace">
@@ -73,7 +73,7 @@
         </div>
 
         <div class="empty" id="emptyState">
-          <div class="empty-title">等待 H.264 RTSP</div>
+          <div class="empty-title" id="startupMessage">等待 H.264 RTSP</div>
         </div>
       </section>
 
@@ -87,8 +87,9 @@
           <span id="timeLabel">源码 HLS 直通 / H.265 仅观看预览</span>
         </div>
         <div class="speed-readout">
-          <span>H.265 编码速度</span>
-          <strong id="encodeSpeed">--</strong>
+          <span>H.265 处理状态</span>
+          <strong id="encodeState">采样中</strong>
+          <small id="encodeSpeed">处理节奏 --</small>
         </div>
       </section>
 
@@ -154,10 +155,14 @@
             <strong id="bufferStatus">--</strong>
           </div>
           <div class="metric-card status-wide">
+            <span class="metric-label">编码积压趋势（约 30 秒）</span>
+            <strong id="backlogTrend">等待数据</strong>
+          </div>
+          <div class="metric-card status-wide">
             <span class="metric-label">告警</span>
             <strong id="warningText">--</strong>
           </div>
-          <div class="metric-card status-wide">
+          <div class="metric-card status-full">
             <span class="metric-label">错误</span>
             <strong id="errorText">--</strong>
           </div>
@@ -168,6 +173,6 @@
     </main>
 
     <script src="/vendor/hls.min.js?v=1.5.17" defer></script>
-    <script src="/app.js?v=2.1.0-ui1" defer></script>
+    <script src="/app.js?v=2.1.0-ui2" defer></script>
   </body>
 </html>

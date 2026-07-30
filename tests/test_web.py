@@ -1,9 +1,13 @@
 import unittest
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from hevc_lab.web.app import create_app
 from hevc_lab.web.streams import StreamNotFound
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class StubStreamManager:
@@ -66,6 +70,18 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(
             any(getattr(route, "path", "").startswith(legacy_prefix) for route in self.app.routes)
         )
+
+    def test_frontend_uses_gated_startup_and_backlog_health(self):
+        script = (PROJECT_ROOT / "apps" / "web" / "app.js").read_text(encoding="utf-8")
+        page = (PROJECT_ROOT / "apps" / "web" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("const STARTUP_BUFFER_SECONDS = 3;", script)
+        self.assertIn("const SOFT_SYNC_THRESHOLD_SECONDS = 0.15;", script)
+        self.assertIn("const SYNC_GRACE_MS = 2000;", script)
+        self.assertIn("const BACKLOG_TREND_WINDOW_MS = 30000;", script)
+        self.assertNotIn("if (sourcePlaylistUrl || h265PlaylistUrl)", script)
+        self.assertIn('id="startupMessage"', page)
+        self.assertIn('id="encodeState"', page)
+        self.assertIn('id="backlogTrend"', page)
 
 
 if __name__ == "__main__":

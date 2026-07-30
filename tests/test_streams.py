@@ -153,6 +153,7 @@ class StreamManagerTests(unittest.TestCase):
         self.assertNotIn("libx264", source_hls)
         self.assertIn("libx264", h265_preview)
         self.assertEqual(sum(command.count("libx264") for command in commands), 1)
+        self.assertEqual(h265_preview[h265_preview.index("-crf") + 1], "21")
         self.assertEqual(h265_encoder[h265_encoder.index("-preset") + 1], "fast")
         self.assertIn("-nostats", h265_encoder)
         self.assertEqual(h265_encoder[h265_encoder.index("-crf") + 1], "36.0")

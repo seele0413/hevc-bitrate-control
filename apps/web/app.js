@@ -8,6 +8,7 @@ const els = {
   savingLabel: document.querySelector("#savingLabel"),
   savingBadge: document.querySelector("#savingBadge"),
   emptyState: document.querySelector("#emptyState"),
+  startupMessage: document.querySelector("#startupMessage"),
   sourceVideo: document.querySelector("#sourceVideo"),
   h265Video: document.querySelector("#h265Video"),
   sourceResolution: document.querySelector("#sourceResolution"),
@@ -22,11 +23,13 @@ const els = {
   playBtn: document.querySelector("#playBtn"),
   liveChip: document.querySelector("#liveChip"),
   timeLabel: document.querySelector("#timeLabel"),
+  encodeState: document.querySelector("#encodeState"),
   encodeSpeed: document.querySelector("#encodeSpeed"),
   streamStatus: document.querySelector("#streamStatus"),
   maskedUrl: document.querySelector("#maskedUrl"),
   outputStatus: document.querySelector("#outputStatus"),
   bufferStatus: document.querySelector("#bufferStatus"),
+  backlogTrend: document.querySelector("#backlogTrend"),
   warningText: document.querySelector("#warningText"),
   errorText: document.querySelector("#errorText"),
   configSummary: document.querySelector("#configSummary"),
@@ -34,11 +37,15 @@ const els = {
 };
 
 const players = { source: null, h265_optimized: null };
-const STARTUP_BUFFER_SECONDS = 5;
-const SOFT_SYNC_THRESHOLD_SECONDS = 0.08;
+const STARTUP_BUFFER_SECONDS = 3;
+const SOFT_SYNC_THRESHOLD_SECONDS = 0.15;
 const HARD_SYNC_THRESHOLD_SECONDS = 3;
+const SYNC_GRACE_MS = 2000;
 const SLOW_PLAYBACK_RATE = 0.98;
 const FAST_PLAYBACK_RATE = 1.02;
+const BACKLOG_TREND_WINDOW_MS = 30000;
+const BACKLOG_TREND_MIN_SPAN_MS = 10000;
+const BACKLOG_GROWTH_THRESHOLD_SECONDS_PER_MINUTE = 0.5;
 
 let dragging = false;
 let streamId = null;
@@ -49,11 +56,13 @@ let sourcePlaylistUrl = null;
 let h265PlaylistUrl = null;
 let playbackReady = false;
 let playbackStarted = false;
+let playbackStartedAt = null;
 let stopping = false;
 let splitFrame = null;
 let pendingSplit = 50;
 let currentSplit = 50;
 let wasPlayingBeforeDrag = false;
+let backlogSamples = [];
 
 function setSplit(pct) {
   const next = Math.max(0, Math.min(100, pct));
@@ -98,6 +107,7 @@ function setLiveChip(status) {
 }
 
 function metricNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -117,6 +127,99 @@ function formatBytes(value) {
   if (!Number.isFinite(number)) return "--";
   if (number >= 1024 * 1024) return `${(number / 1024 / 1024).toFixed(1)} MiB`;
   return `${Math.round(number / 1024)} KiB`;
+}
+
+function setStartupMessage(message) {
+  if (els.startupMessage) els.startupMessage.textContent = message;
+}
+
+function resetBacklogTrend() {
+  backlogSamples = [];
+  if (els.encodeState) els.encodeState.textContent = "采样中";
+  if (els.encodeSpeed) els.encodeSpeed.textContent = "处理节奏 --";
+  if (els.backlogTrend) els.backlogTrend.textContent = "等待数据";
+  const health = els.encodeState?.closest(".speed-readout");
+  if (health) health.classList.remove("stable", "growing");
+}
+
+function sampleBacklog(value) {
+  const backlog = metricNumber(value);
+  if (!Number.isFinite(backlog) || backlog < 0) return null;
+  const now = performance.now();
+  const previous = backlogSamples[backlogSamples.length - 1];
+  if (!previous || now - previous.time >= 800) {
+    backlogSamples.push({ time: now, backlog });
+  }
+  backlogSamples = backlogSamples.filter(
+    (sample) => now - sample.time <= BACKLOG_TREND_WINDOW_MS,
+  );
+  if (backlogSamples.length < 2) return { state: "sampling", spanMs: 0 };
+
+  const first = backlogSamples[0];
+  const last = backlogSamples[backlogSamples.length - 1];
+  const spanMs = last.time - first.time;
+  if (spanMs < BACKLOG_TREND_MIN_SPAN_MS) return { state: "sampling", spanMs };
+
+  const points = backlogSamples.map((sample) => ({
+    x: (sample.time - first.time) / 1000,
+    y: sample.backlog,
+  }));
+  const meanX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+  const meanY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+  const covariance = points.reduce(
+    (sum, point) => sum + (point.x - meanX) * (point.y - meanY),
+    0,
+  );
+  const variance = points.reduce(
+    (sum, point) => sum + (point.x - meanX) ** 2,
+    0,
+  );
+  const ratePerMinute = variance > 0 ? (covariance / variance) * 60 : 0;
+  const deltas = backlogSamples.slice(1).map(
+    (sample, index) => sample.backlog - backlogSamples[index].backlog,
+  );
+  const nonDecreasingRatio = deltas.filter((delta) => delta >= -0.03).length / deltas.length;
+  const netGrowth = last.backlog - first.backlog;
+  const requiredGrowth = Math.max(
+    0.08,
+    BACKLOG_GROWTH_THRESHOLD_SECONDS_PER_MINUTE * (spanMs / 60000),
+  );
+  const growing = ratePerMinute > BACKLOG_GROWTH_THRESHOLD_SECONDS_PER_MINUTE &&
+    netGrowth >= requiredGrowth &&
+    nonDecreasingRatio >= 0.7;
+  return { state: growing ? "growing" : "stable", ratePerMinute, spanMs };
+}
+
+function updateEncodeHealth(backlog, speed) {
+  const trend = sampleBacklog(backlog);
+  const speedValue = metricNumber(speed);
+  els.encodeSpeed.textContent = Number.isFinite(speedValue)
+    ? `处理节奏 ${speedValue.toFixed(2)}x`
+    : "处理节奏 --";
+
+  const health = els.encodeState?.closest(".speed-readout");
+  if (health) health.classList.remove("stable", "growing");
+  if (!trend) {
+    els.encodeState.textContent = "采样中";
+    els.backlogTrend.textContent = "等待数据";
+    return;
+  }
+  if (trend.state === "sampling") {
+    els.encodeState.textContent = "采样中";
+    els.backlogTrend.textContent = `已采样 ${Math.floor(trend.spanMs / 1000)} 秒`;
+    return;
+  }
+
+  const rate = Math.abs(trend.ratePerMinute) < 0.05 ? 0 : trend.ratePerMinute;
+  const prefix = rate > 0 ? "+" : "";
+  els.backlogTrend.textContent = `约 ${prefix}${rate.toFixed(1)} s/min`;
+  if (trend.state === "growing") {
+    els.encodeState.textContent = "积压增长";
+    if (health) health.classList.add("growing");
+  } else {
+    els.encodeState.textContent = "实时稳定";
+    if (health) health.classList.add("stable");
+  }
 }
 
 function resolutionFromProbe(probe) {
@@ -224,6 +327,9 @@ function maybeStartBufferedPlayback() {
     video.playbackRate = 1;
   });
   playbackReady = true;
+  setStartupMessage("双路准备完成");
+  els.stage.classList.add("active");
+  els.emptyState.classList.add("hide");
   els.playBtn.disabled = false;
   if (!playbackStarted) playBoth();
   return true;
@@ -233,6 +339,10 @@ function syncPlayers() {
   if (dragging) return;
   if (!playbackReady && !maybeStartBufferedPlayback()) return;
   const videos = [els.sourceVideo, els.h265Video];
+  if (playbackStartedAt !== null && performance.now() - playbackStartedAt < SYNC_GRACE_MS) {
+    videos.forEach((video) => { video.playbackRate = 1; });
+    return;
+  }
   if (videos.some((video) => video.paused)) return;
   const timelines = videos.map(playerTimeline);
   if (timelines.some((timeline) => !timeline)) return;
@@ -321,6 +431,7 @@ function detachPlayers() {
   h265PlaylistUrl = null;
   playbackReady = false;
   playbackStarted = false;
+  playbackStartedAt = null;
   for (const video of [els.sourceVideo, els.h265Video]) {
     video.pause();
     video.removeAttribute("src");
@@ -330,10 +441,13 @@ function detachPlayers() {
   els.stage.classList.remove("active");
   els.controls.classList.remove("playing");
   els.playBtn.disabled = true;
+  setStartupMessage("等待 H.264 RTSP");
+  resetBacklogTrend();
 }
 
 function playBoth() {
   if (!playbackReady) return;
+  if (!playbackStarted) playbackStartedAt = performance.now();
   playbackStarted = true;
   els.sourceVideo.play().catch(() => {});
   els.h265Video.play().catch(() => {});
@@ -365,8 +479,7 @@ function updateStatus(payload) {
   els.h265Bitrate.textContent = formatBitrate(h265Metrics.elementary_bitrate_mbps);
   els.sourceBytes.textContent = formatBytes(sourceMetrics.elementary_bytes_in_window);
   els.h265Backlog.textContent = formatLatency(h265Metrics.encoder_backlog_seconds);
-  const speed = metricNumber(h265Metrics.encode_speed_x);
-  els.encodeSpeed.textContent = Number.isFinite(speed) ? `${speed.toFixed(2)}x` : "--";
+  updateEncodeHealth(h265Metrics.encoder_backlog_seconds, h265Metrics.encode_speed_x);
   const depth = metricNumber(buffer.depth_frames);
   const capacity = metricNumber(buffer.capacity_frames);
   els.bufferStatus.textContent = Number.isFinite(depth) && Number.isFinite(capacity)
@@ -385,9 +498,18 @@ function updateStatus(payload) {
     attachHls(els.h265Video, payload.h265_optimized_playlist_url, "h265_optimized");
     h265PlaylistUrl = payload.h265_optimized_playlist_url;
   }
-  if (sourcePlaylistUrl || h265PlaylistUrl) {
-    els.emptyState.classList.add("hide");
-    els.stage.classList.add("active");
+  if (!playbackReady) {
+    els.emptyState.classList.remove("hide");
+    els.stage.classList.remove("active");
+    if (sourcePlaylistUrl && h265PlaylistUrl) {
+      setStartupMessage("正在建立双路缓冲");
+    } else if (sourcePlaylistUrl) {
+      setStartupMessage("等待 H.265 预览");
+    } else if (h265PlaylistUrl) {
+      setStartupMessage("等待源码关键帧");
+    } else {
+      setStartupMessage("正在连接 H.264 RTSP");
+    }
   }
   if (sourcePlaylistUrl && h265PlaylistUrl) maybeStartBufferedPlayback();
   if (payload.status === "failed" || payload.status === "stopped") {
@@ -477,6 +599,7 @@ async function checkRuntime() {
 async function startStream(rtspUrl) {
   if (!(await checkRuntime())) return;
   detachPlayers();
+  setStartupMessage("正在连接 H.264 RTSP");
   setBusy(true);
   setLiveChip("starting");
   els.errorText.textContent = "--";
