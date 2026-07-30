@@ -1,3 +1,0 @@
-strategy,resolution,average_video_packet_bitrate_bps,average_video_packet_bitrate_mbps,selected_crf,vmaf_mean,vmaf_p5,ssim,encode_speed_x,saving_vs_default_pct,saving_vs_general_no_roi_pct,budget_neutral_pass,roi_quality_preserved,roi_quality_improved
-H.264 原生编码,1920x1080,770572.800000,0.770573,,,,,,,,,,
-H.265 固定参数方案,1920x1080,298019.866667,0.298020,36.0,85.019,81.445,0.977667,1.711,61.32,,,,

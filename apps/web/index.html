@@ -3,93 +3,164 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>V1.6 RTSP 实时双路编码</title>
+    <title>V2.1.0 实时源码直流</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/styles.css?v=1.6.0-live2" />
+    <link rel="stylesheet" href="/styles.css?v=2.1.0-ui1" />
   </head>
   <body>
-    <main class="card">
-      <header>
-        <h1>RTSP 实时双路编码</h1>
-        <p class="subtitle">H.264 原生参数编码 / H265编码参数优化 · V1.6</p>
+    <main class="workspace">
+      <header class="app-header">
+        <div class="brand">
+          <span class="eyebrow">V2.1.0 实时控制台</span>
+          <h1>H.264 源码直流与 H.265 固定编码</h1>
+          <p class="subtitle">H.264 / H.265 实时码率、延迟与队列状态</p>
+        </div>
+        <div class="session-panel" aria-label="当前会话状态">
+          <span class="session-label">会话</span>
+          <div class="live-chip" id="liveChip">未连接</div>
+        </div>
       </header>
 
-      <form class="stream-form" id="streamForm">
-        <input
-          id="rtspInput"
-          class="rtsp-input"
-          type="password"
-          inputmode="url"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="rtsp://user:password@camera-ip/stream"
-          aria-label="原始 RTSP 地址"
-          required
-        />
-        <button class="primary-btn" id="startBtn" type="submit">启动</button>
-        <button class="secondary-btn" id="stopBtn" type="button" disabled>停止</button>
-      </form>
+      <section class="connection-panel" aria-label="RTSP 输入">
+        <div class="connection-copy">
+          <span class="panel-kicker">输入源</span>
+          <strong>H.264 RTSP</strong>
+          <span>凭据脱敏</span>
+        </div>
+        <form class="stream-form" id="streamForm">
+          <input
+            id="rtspInput"
+            class="rtsp-input"
+            type="password"
+            inputmode="url"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="rtsp://user:password@camera-ip/stream"
+            aria-label="H.264 RTSP 地址"
+            required
+          />
+          <button class="primary-btn" id="startBtn" type="submit">启动实时流</button>
+          <button class="secondary-btn" id="stopBtn" type="button" disabled>停止</button>
+        </form>
+      </section>
 
-      <section class="stage" id="stage" aria-label="实时编码对比画面">
-        <video class="media base" id="h264Video" playsinline muted></video>
+      <section class="stage" id="stage" aria-label="实时源码与 H.265 编码对比画面">
+        <video class="media base" id="sourceVideo" playsinline muted></video>
         <video class="media ours" id="h265Video" playsinline muted></video>
 
         <div class="label base">
-          <div class="name">H.264 原生参数编码</div>
-          <div>Resolution: <span id="h264Resolution">--</span></div>
-          <div>Bitrate: <span class="hl" id="h264Bitrate">--</span></div>
-          <div>CRF: <span id="h264Crf">原生默认</span></div>
-          <div>Latency: <span id="h264Latency">--</span></div>
+          <div class="name">原始 H.264 源码流（直通）</div>
+          <div>分辨率 <span id="sourceResolution">--</span></div>
+          <div>源码码率 <span class="hl" id="sourceBitrate">--</span></div>
+          <div>30 秒字节 <span id="sourceBytes">--</span></div>
+          <div>播放延迟 <span id="sourceLatency">--</span></div>
         </div>
 
         <div class="label ours">
-          <div class="name">H265编码参数优化</div>
-          <div>Resolution: <span id="h265Resolution">--</span></div>
-          <div>Bitrate: <span class="hl" id="h265Bitrate">--</span></div>
-          <div>CRF: <span id="h265Crf">36.0</span></div>
-          <div>Latency: <span id="h265Latency">--</span></div>
+          <div class="name">H.265 固定参数编码</div>
+          <div class="preview-flag">H.264 仅观看预览 · 不计码率</div>
+          <div>分辨率 <span id="h265Resolution">--</span></div>
+          <div>H.265 码率 <span class="hl" id="h265Bitrate">--</span></div>
+          <div>播放延迟 <span id="h265Latency">--</span></div>
+          <div>编码积压 <span id="h265Backlog">--</span></div>
         </div>
 
         <div class="divider" id="divider" tabindex="0" role="slider" aria-label="对比分割线" aria-valuenow="50" aria-valuemin="0" aria-valuemax="100">
           <div class="badge">
-            <span class="small">码率差</span>
+            <span class="small" id="savingLabel">码率差</span>
             <span class="big" id="savingBadge">--</span>
           </div>
         </div>
 
         <div class="empty" id="emptyState">
-          <div class="empty-title">等待 RTSP</div>
-          <div class="empty-desc">启动后显示两路实时编码预览</div>
+          <div class="empty-title">等待 H.264 RTSP</div>
         </div>
       </section>
 
-      <div class="controls" id="controls">
-        <button class="ctrl-btn" id="playBtn" type="button" aria-label="播放 / 暂停" disabled>
-          <svg class="icon-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>
-          <svg class="icon-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"></path></svg>
+      <section class="controls" id="controls" aria-label="播放控制">
+        <button class="ctrl-btn" id="playBtn" type="button" aria-label="播放或暂停" disabled>
+          <span class="icon-play" aria-hidden="true">▶</span>
+          <span class="icon-pause" aria-hidden="true">Ⅱ</span>
         </button>
-        <div class="live-chip" id="liveChip">未连接</div>
-        <div class="time" id="timeLabel">HLS: --</div>
-      </div>
+        <div class="control-copy">
+          <strong>双路同步播放</strong>
+          <span id="timeLabel">源码 HLS 直通 / H.265 仅观看预览</span>
+        </div>
+        <div class="speed-readout">
+          <span>H.265 编码速度</span>
+          <strong id="encodeSpeed">--</strong>
+        </div>
+      </section>
 
-      <p class="preview-note">画面为两路原生编码结果的等价 H.264 预览，码率统计来自预览转码之前。</p>
+      <section class="parameter-panel" aria-label="H.265 固定参数">
+        <div class="section-heading">
+          <div>
+            <span class="panel-kicker">固定编码参数</span>
+            <h2>H.265 实时编码配置</h2>
+          </div>
+          <p>运行时唯一配置</p>
+        </div>
+        <div class="parameter-grid" id="configSummary">
+          <div class="param-card">
+            <span>码率控制</span>
+            <strong>CRF 36.0</strong>
+          </div>
+          <div class="param-card">
+            <span>速度档位</span>
+            <strong>preset fast</strong>
+          </div>
+          <div class="param-card">
+            <span>输出格式</span>
+            <strong>Main 8-bit · yuv420p</strong>
+          </div>
+          <div class="param-card">
+            <span>帧间结构</span>
+            <strong>ref 4 · B 4 · adapt 2</strong>
+          </div>
+          <div class="param-card">
+            <span>前瞻与 AQ</span>
+            <strong>lookahead 45 · AQ2</strong>
+          </div>
+          <div class="param-card">
+            <span>GOP</span>
+            <strong>2-10 秒 · scenecut 40</strong>
+          </div>
+        </div>
+      </section>
 
-      <section class="metrics-grid" aria-label="实时状态">
-        <div>
-          <span class="metric-label">流状态</span>
-          <strong id="streamStatus">idle</strong>
+      <section class="telemetry-panel" aria-label="实时状态">
+        <div class="section-heading">
+          <div>
+            <span class="panel-kicker">运行遥测</span>
+            <h2>当前流状态</h2>
+          </div>
+          <p>30 秒滚动码率窗口</p>
         </div>
-        <div>
-          <span class="metric-label">RTSP 地址</span>
-          <strong id="maskedUrl">--</strong>
-        </div>
-        <div>
-          <span class="metric-label">输出状态</span>
-          <strong id="outputStatus">--</strong>
-        </div>
-        <div>
-          <span class="metric-label">FFmpeg</span>
-          <strong id="errorText">--</strong>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <span class="metric-label">流状态</span>
+            <strong id="streamStatus">idle</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">RTSP 地址</span>
+            <strong id="maskedUrl">--</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">输出状态</span>
+            <strong id="outputStatus">--</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">帧缓冲</span>
+            <strong id="bufferStatus">--</strong>
+          </div>
+          <div class="metric-card status-wide">
+            <span class="metric-label">告警</span>
+            <strong id="warningText">--</strong>
+          </div>
+          <div class="metric-card status-wide">
+            <span class="metric-label">错误</span>
+            <strong id="errorText">--</strong>
+          </div>
         </div>
       </section>
 
@@ -97,6 +168,6 @@
     </main>
 
     <script src="/vendor/hls.min.js?v=1.5.17" defer></script>
-    <script src="/app.js?v=1.6.0-live2" defer></script>
+    <script src="/app.js?v=2.1.0-ui1" defer></script>
   </body>
 </html>

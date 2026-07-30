@@ -5,52 +5,67 @@ const els = {
   stopBtn: document.querySelector("#stopBtn"),
   stage: document.querySelector("#stage"),
   divider: document.querySelector("#divider"),
+  savingLabel: document.querySelector("#savingLabel"),
   savingBadge: document.querySelector("#savingBadge"),
   emptyState: document.querySelector("#emptyState"),
-  h264Video: document.querySelector("#h264Video"),
+  sourceVideo: document.querySelector("#sourceVideo"),
   h265Video: document.querySelector("#h265Video"),
-  h264Resolution: document.querySelector("#h264Resolution"),
+  sourceResolution: document.querySelector("#sourceResolution"),
   h265Resolution: document.querySelector("#h265Resolution"),
-  h264Bitrate: document.querySelector("#h264Bitrate"),
+  sourceBitrate: document.querySelector("#sourceBitrate"),
   h265Bitrate: document.querySelector("#h265Bitrate"),
-  h264Crf: document.querySelector("#h264Crf"),
-  h265Crf: document.querySelector("#h265Crf"),
-  h264Latency: document.querySelector("#h264Latency"),
+  sourceBytes: document.querySelector("#sourceBytes"),
+  sourceLatency: document.querySelector("#sourceLatency"),
   h265Latency: document.querySelector("#h265Latency"),
+  h265Backlog: document.querySelector("#h265Backlog"),
   controls: document.querySelector("#controls"),
   playBtn: document.querySelector("#playBtn"),
   liveChip: document.querySelector("#liveChip"),
   timeLabel: document.querySelector("#timeLabel"),
+  encodeSpeed: document.querySelector("#encodeSpeed"),
   streamStatus: document.querySelector("#streamStatus"),
   maskedUrl: document.querySelector("#maskedUrl"),
   outputStatus: document.querySelector("#outputStatus"),
+  bufferStatus: document.querySelector("#bufferStatus"),
+  warningText: document.querySelector("#warningText"),
   errorText: document.querySelector("#errorText"),
+  configSummary: document.querySelector("#configSummary"),
   runtimeError: document.querySelector("#runtimeError"),
 };
 
-const players = {
-  h264_native: null,
-  h265_optimized: null,
-};
-
-const SYNC_TARGET_LAG_SECONDS = 2;
-const HARD_SYNC_THRESHOLD_SECONDS = 0.5;
+const players = { source: null, h265_optimized: null };
+const STARTUP_BUFFER_SECONDS = 5;
+const SOFT_SYNC_THRESHOLD_SECONDS = 0.08;
+const HARD_SYNC_THRESHOLD_SECONDS = 3;
+const SLOW_PLAYBACK_RATE = 0.98;
+const FAST_PLAYBACK_RATE = 1.02;
 
 let dragging = false;
 let streamId = null;
 let pollTimer = null;
 let latencyTimer = null;
 let heartbeatTimer = null;
-let h264PlaylistUrl = null;
+let sourcePlaylistUrl = null;
 let h265PlaylistUrl = null;
-let latestPayload = null;
+let playbackReady = false;
+let playbackStarted = false;
+let stopping = false;
+let splitFrame = null;
+let pendingSplit = 50;
+let currentSplit = 50;
+let wasPlayingBeforeDrag = false;
 
 function setSplit(pct) {
   const next = Math.max(0, Math.min(100, pct));
-  els.h265Video.style.clipPath = `inset(0 0 0 ${next}%)`;
-  els.divider.style.left = `${next}%`;
-  els.stage.style.setProperty("--p", next);
-  els.divider.setAttribute("aria-valuenow", Math.round(next));
+  pendingSplit = next;
+  if (splitFrame) return;
+  splitFrame = window.requestAnimationFrame(() => {
+    currentSplit = pendingSplit;
+    els.stage.style.setProperty("--p", currentSplit);
+    els.stage.style.setProperty("--split", `${currentSplit}%`);
+    els.divider.setAttribute("aria-valuenow", Math.round(currentSplit));
+    splitFrame = null;
+  });
 }
 
 function posFromEvent(clientX) {
@@ -59,26 +74,27 @@ function posFromEvent(clientX) {
 }
 
 function setBusy(busy) {
-  els.startBtn.disabled = busy;
-  els.rtspInput.disabled = busy && Boolean(streamId);
-  els.stopBtn.disabled = !streamId;
+  const active = Boolean(streamId);
+  els.startBtn.disabled = busy || active || stopping;
+  els.rtspInput.disabled = busy || active || stopping;
+  els.stopBtn.disabled = !active || stopping;
 }
 
 function setLiveChip(status) {
-  els.liveChip.classList.remove("running", "failed");
-  if (status === "running") {
-    els.liveChip.textContent = "实时预览中";
-    els.liveChip.classList.add("running");
-  } else if (status === "failed") {
-    els.liveChip.textContent = "拉流失败";
-    els.liveChip.classList.add("failed");
-  } else if (status === "starting") {
-    els.liveChip.textContent = "启动中";
-  } else if (status === "stopped") {
-    els.liveChip.textContent = "已停止";
-  } else {
-    els.liveChip.textContent = "未连接";
-  }
+  els.liveChip.classList.remove("running", "failed", "starting", "stopping");
+  const labels = {
+    running: "实时处理中",
+    failed: "处理失败",
+    starting: "启动中",
+    stopping: "停止中",
+    stopped: "已停止",
+    idle: "未连接",
+  };
+  els.liveChip.textContent = labels[status] || "未连接";
+  if (status === "running") els.liveChip.classList.add("running");
+  if (status === "failed") els.liveChip.classList.add("failed");
+  if (status === "starting") els.liveChip.classList.add("starting");
+  if (status === "stopping") els.liveChip.classList.add("stopping");
 }
 
 function metricNumber(value) {
@@ -92,7 +108,15 @@ function formatBitrate(value) {
 }
 
 function formatLatency(value) {
-  return Number.isFinite(value) && value >= 0 ? `${value.toFixed(1)} s` : "--";
+  const number = metricNumber(value);
+  return Number.isFinite(number) && number >= 0 ? `${number.toFixed(1)} s` : "--";
+}
+
+function formatBytes(value) {
+  const number = metricNumber(value);
+  if (!Number.isFinite(number)) return "--";
+  if (number >= 1024 * 1024) return `${(number / 1024 / 1024).toFixed(1)} MiB`;
+  return `${Math.round(number / 1024)} KiB`;
 }
 
 function resolutionFromProbe(probe) {
@@ -103,46 +127,79 @@ function output(payload, variant) {
   return payload.outputs?.[variant] || {};
 }
 
-function probe(payload, variant) {
-  return payload.probes?.[variant] || output(payload, variant).probe || {};
-}
-
 function metrics(payload, variant) {
   return output(payload, variant).metrics || {};
 }
 
 function outputError(payload) {
-  const errors = [];
-  for (const variant of ["h264_native", "h265_optimized"]) {
-    const item = output(payload, variant);
-    if (item.error) errors.push(`${variant}: ${item.error}`);
-    if (item.metric_error) errors.push(`${variant} metric: ${item.metric_error}`);
+  for (const variant of ["source", "h265_optimized"]) {
+    if (output(payload, variant).error) return output(payload, variant).error;
   }
-  if (payload.last_error) errors.push(payload.last_error);
-  return errors[0] || "--";
+  return payload.error || "--";
 }
 
 function outputStatus(payload) {
-  const h264 = output(payload, "h264_native").status || "--";
+  const source = output(payload, "source").status || "--";
   const h265 = output(payload, "h265_optimized").status || "--";
-  return `H.264 ${h264} / H.265 ${h265}`;
+  return `源码 ${source} / H.265 ${h265}`;
+}
+
+function configValue(value, suffix = "") {
+  if (value === null || value === undefined || value === "") return "--";
+  return `${value}${suffix}`;
+}
+
+function renderConfig(config) {
+  if (!config || typeof config !== "object" || !els.configSummary) return;
+  const crf = metricNumber(config.crf);
+  const profile = String(config.profile || "main").toLowerCase() === "main"
+    ? "Main 8-bit"
+    : config.profile;
+  const cards = [
+    ["码率控制", `CRF ${Number.isFinite(crf) ? crf.toFixed(1) : "--"}`],
+    ["速度档位", `preset ${configValue(config.preset)}`],
+    ["输出格式", `${configValue(profile)} · ${configValue(config.pixel_format)}`],
+    [
+      "帧间结构",
+      `ref ${configValue(config.ref)} · B ${configValue(config.bframes)} · adapt ${configValue(config.b_adapt)}`,
+    ],
+    [
+      "前瞻与 AQ",
+      `lookahead ${configValue(config.lookahead)} · AQ${configValue(config.aq_mode)} · qg ${configValue(config.qg_size)}`,
+    ],
+    [
+      "GOP 与工具",
+      `${configValue(config.min_gop_seconds)}-${configValue(config.gop_seconds)} 秒 · scenecut ${configValue(config.scenecut)} · cutree/weightp`,
+    ],
+  ];
+  els.configSummary.replaceChildren(
+    ...cards.map(([label, value]) => {
+      const card = document.createElement("div");
+      const labelNode = document.createElement("span");
+      const valueNode = document.createElement("strong");
+      card.className = "param-card";
+      labelNode.textContent = label;
+      valueNode.textContent = value;
+      card.append(labelNode, valueNode);
+      return card;
+    }),
+  );
 }
 
 function playerLatency(video, key) {
   const player = players[key];
-  if (player && Number.isFinite(player.latency)) {
-    return player.latency;
-  }
+  if (player && Number.isFinite(player.latency)) return player.latency;
   const seekable = video.seekable;
-  if (!seekable || seekable.length <= 0) return null;
+  if (!seekable || seekable.length === 0) return null;
   const liveEdge = seekable.end(seekable.length - 1);
-  if (!Number.isFinite(liveEdge)) return null;
-  return Math.max(0, liveEdge - video.currentTime);
+  return Number.isFinite(liveEdge) ? Math.max(0, liveEdge - video.currentTime) : null;
 }
 
 function updateLatencyLabels() {
-  els.h264Latency.textContent = formatLatency(playerLatency(els.h264Video, "h264_native"));
-  els.h265Latency.textContent = formatLatency(playerLatency(els.h265Video, "h265_optimized"));
+  els.sourceLatency.textContent = formatLatency(playerLatency(els.sourceVideo, "source"));
+  els.h265Latency.textContent = formatLatency(
+    playerLatency(els.h265Video, "h265_optimized"),
+  );
 }
 
 function playerTimeline(video) {
@@ -153,8 +210,29 @@ function playerTimeline(video) {
   return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
 }
 
+function maybeStartBufferedPlayback() {
+  if (playbackReady) return true;
+  const videos = [els.sourceVideo, els.h265Video];
+  const timelines = videos.map(playerTimeline);
+  if (timelines.some((timeline) => !timeline)) return false;
+  const commonStart = Math.max(...timelines.map((timeline) => timeline.start));
+  const commonEnd = Math.min(...timelines.map((timeline) => timeline.end));
+  if (commonEnd - commonStart < STARTUP_BUFFER_SECONDS) return false;
+  const target = commonEnd - STARTUP_BUFFER_SECONDS;
+  videos.forEach((video) => {
+    video.currentTime = target;
+    video.playbackRate = 1;
+  });
+  playbackReady = true;
+  els.playBtn.disabled = false;
+  if (!playbackStarted) playBoth();
+  return true;
+}
+
 function syncPlayers() {
-  const videos = [els.h264Video, els.h265Video];
+  if (dragging) return;
+  if (!playbackReady && !maybeStartBufferedPlayback()) return;
+  const videos = [els.sourceVideo, els.h265Video];
   if (videos.some((video) => video.paused)) return;
   const timelines = videos.map(playerTimeline);
   if (timelines.some((timeline) => !timeline)) return;
@@ -164,52 +242,65 @@ function syncPlayers() {
   if (Math.abs(delta) > HARD_SYNC_THRESHOLD_SECONDS) {
     const commonStart = Math.max(...timelines.map((timeline) => timeline.start));
     const commonEnd = Math.min(...timelines.map((timeline) => timeline.end));
-    const target = Math.max(commonStart, commonEnd - SYNC_TARGET_LAG_SECONDS);
+    const target = Math.max(commonStart, Math.min(...videos.map((video) => video.currentTime)));
     if (target <= commonEnd) {
       videos.forEach((video) => {
         video.currentTime = target;
         video.playbackRate = 1;
       });
     }
+    return;
+  }
+
+  if (Math.abs(delta) <= SOFT_SYNC_THRESHOLD_SECONDS) {
+    videos.forEach((video) => { video.playbackRate = 1; });
+  } else if (delta > 0) {
+    videos[0].playbackRate = SLOW_PLAYBACK_RATE;
+    videos[1].playbackRate = FAST_PLAYBACK_RATE;
+  } else {
+    videos[0].playbackRate = FAST_PLAYBACK_RATE;
+    videos[1].playbackRate = SLOW_PLAYBACK_RATE;
   }
 }
 
 function updateSaving(payload) {
   const saving = metricNumber(payload.bandwidth_saving_pct);
-  els.savingBadge.textContent = Number.isFinite(saving) ? `${saving.toFixed(0)}%` : "--";
-}
-
-function clearPlaylistAttachment(key) {
-  if (key === "h264_native") h264PlaylistUrl = null;
-  if (key === "h265_optimized") h265PlaylistUrl = null;
+  els.savingBadge.classList.remove("increase");
+  if (!Number.isFinite(saving)) {
+    els.savingLabel.textContent = "码率差";
+    els.savingBadge.textContent = "--";
+  } else if (saving < 0) {
+    els.savingLabel.textContent = "码率增加";
+    els.savingBadge.textContent = `${Math.abs(saving).toFixed(1)}%`;
+    els.savingBadge.classList.add("increase");
+  } else {
+    els.savingLabel.textContent = "码率节省";
+    els.savingBadge.textContent = `${saving.toFixed(1)}%`;
+  }
 }
 
 function attachHls(video, url, key) {
   if (!url) return;
-  if (players[key]) {
-    players[key].destroy();
-    players[key] = null;
-  }
+  if (players[key]) players[key].destroy();
+  players[key] = null;
   if (window.Hls && window.Hls.isSupported()) {
     const player = new window.Hls({
       lowLatencyMode: false,
-      liveSyncDurationCount: 2,
-      maxLiveSyncPlaybackRate: 1.25,
-      maxBufferLength: 8,
+      liveSyncDurationCount: 5,
+      maxLiveSyncPlaybackRate: FAST_PLAYBACK_RATE,
+      maxBufferLength: 20,
+      backBufferLength: 20,
     });
     player.on(window.Hls.Events.ERROR, (_event, data) => {
       if (!data || !data.fatal) return;
       if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
         player.startLoad();
-        return;
-      }
-      if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+      } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
         player.recoverMediaError();
-        return;
+      } else {
+        player.destroy();
+        players[key] = null;
       }
-      player.destroy();
-      players[key] = null;
-      clearPlaylistAttachment(key);
     });
     player.loadSource(url);
     player.attachMedia(video);
@@ -223,15 +314,14 @@ function attachHls(video, url, key) {
 
 function detachPlayers() {
   Object.keys(players).forEach((key) => {
-    if (players[key]) {
-      players[key].destroy();
-      players[key] = null;
-    }
+    if (players[key]) players[key].destroy();
+    players[key] = null;
   });
-  h264PlaylistUrl = null;
+  sourcePlaylistUrl = null;
   h265PlaylistUrl = null;
-  latestPayload = null;
-  for (const video of [els.h264Video, els.h265Video]) {
+  playbackReady = false;
+  playbackStarted = false;
+  for (const video of [els.sourceVideo, els.h265Video]) {
     video.pause();
     video.removeAttribute("src");
     video.load();
@@ -240,102 +330,93 @@ function detachPlayers() {
   els.stage.classList.remove("active");
   els.controls.classList.remove("playing");
   els.playBtn.disabled = true;
-  els.h264Bitrate.textContent = "--";
-  els.h265Bitrate.textContent = "--";
-  els.h264Latency.textContent = "--";
-  els.h265Latency.textContent = "--";
-  els.savingBadge.textContent = "--";
 }
 
 function playBoth() {
-  els.h264Video.play().catch(() => {});
+  if (!playbackReady) return;
+  playbackStarted = true;
+  els.sourceVideo.play().catch(() => {});
   els.h265Video.play().catch(() => {});
   els.controls.classList.add("playing");
 }
 
 function pauseBoth() {
-  els.h264Video.pause();
+  els.sourceVideo.pause();
   els.h265Video.pause();
   els.controls.classList.remove("playing");
-  for (const video of [els.h264Video, els.h265Video]) video.playbackRate = 1;
+  for (const video of [els.sourceVideo, els.h265Video]) video.playbackRate = 1;
 }
 
 function updateStatus(payload) {
-  latestPayload = payload;
-  const h264Probe = probe(payload, "h264_native");
-  const h265Probe = probe(payload, "h265_optimized");
-  const h264Metrics = metrics(payload, "h264_native");
+  const sourceProbe = output(payload, "source").probe || payload.probes?.source || {};
+  const h265Probe = output(payload, "h265_optimized").probe || payload.probes?.h265_optimized || {};
+  const sourceMetrics = metrics(payload, "source");
   const h265Metrics = metrics(payload, "h265_optimized");
+  const buffer = payload.frame_buffer || {};
 
   els.streamStatus.textContent = payload.status || "unknown";
   els.maskedUrl.textContent = payload.masked_url || "--";
   els.outputStatus.textContent = outputStatus(payload);
   els.errorText.textContent = outputError(payload);
-  els.h264Resolution.textContent = resolutionFromProbe(h264Probe);
+  els.warningText.textContent = (payload.warnings || []).join("；") || "--";
+  els.sourceResolution.textContent = resolutionFromProbe(sourceProbe);
   els.h265Resolution.textContent = resolutionFromProbe(h265Probe);
-  els.h264Bitrate.textContent = formatBitrate(h264Metrics.native_bitrate_mbps);
-  els.h265Bitrate.textContent = formatBitrate(h265Metrics.native_bitrate_mbps);
-  els.h264Crf.textContent = h264Probe.crf_label || "原生默认";
-  els.h265Crf.textContent = h265Probe.crf_label || "36.0";
-  const dropped = metricNumber(payload.dropped_frames) || 0;
-  els.timeLabel.textContent = `等价 H.264 预览 · 原生码率统计 · 丢帧 ${dropped}`;
+  els.sourceBitrate.textContent = formatBitrate(sourceMetrics.elementary_bitrate_mbps);
+  els.h265Bitrate.textContent = formatBitrate(h265Metrics.elementary_bitrate_mbps);
+  els.sourceBytes.textContent = formatBytes(sourceMetrics.elementary_bytes_in_window);
+  els.h265Backlog.textContent = formatLatency(h265Metrics.encoder_backlog_seconds);
+  const speed = metricNumber(h265Metrics.encode_speed_x);
+  els.encodeSpeed.textContent = Number.isFinite(speed) ? `${speed.toFixed(2)}x` : "--";
+  const depth = metricNumber(buffer.depth_frames);
+  const capacity = metricNumber(buffer.capacity_frames);
+  els.bufferStatus.textContent = Number.isFinite(depth) && Number.isFinite(capacity)
+    ? `${depth} / ${capacity} 帧 · 阻塞背压`
+    : "--";
+  els.timeLabel.textContent = "源码 HLS 直通 / H.265 仅观看预览";
   setLiveChip(payload.status);
   updateLatencyLabels();
   updateSaving(payload);
 
-  if (payload.h264_native_playlist_url && payload.h264_native_playlist_url !== h264PlaylistUrl) {
-    attachHls(els.h264Video, payload.h264_native_playlist_url, "h264_native");
-    h264PlaylistUrl = payload.h264_native_playlist_url;
+  if (payload.source_playlist_url && payload.source_playlist_url !== sourcePlaylistUrl) {
+    attachHls(els.sourceVideo, payload.source_playlist_url, "source");
+    sourcePlaylistUrl = payload.source_playlist_url;
   }
-  if (
-    payload.h265_optimized_playlist_url &&
-    payload.h265_optimized_playlist_url !== h265PlaylistUrl
-  ) {
+  if (payload.h265_optimized_playlist_url && payload.h265_optimized_playlist_url !== h265PlaylistUrl) {
     attachHls(els.h265Video, payload.h265_optimized_playlist_url, "h265_optimized");
     h265PlaylistUrl = payload.h265_optimized_playlist_url;
   }
-  if (h264PlaylistUrl || h265PlaylistUrl) {
+  if (sourcePlaylistUrl || h265PlaylistUrl) {
     els.emptyState.classList.add("hide");
     els.stage.classList.add("active");
   }
-  if (h264PlaylistUrl && h265PlaylistUrl) {
-    els.playBtn.disabled = false;
-    playBoth();
-  }
+  if (sourcePlaylistUrl && h265PlaylistUrl) maybeStartBufferedPlayback();
   if (payload.status === "failed" || payload.status === "stopped") {
     stopPolling();
+    streamId = null;
+    stopping = false;
+    detachPlayers();
     setBusy(false);
   }
 }
 
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
-  let payload = null;
+  let payload = {};
   try {
     payload = await response.json();
   } catch {
     payload = {};
   }
   if (!response.ok) {
-    throw new Error(payload.detail || `请求失败：${response.status}`);
+    const error = new Error(payload.detail || `请求失败：${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
 
 function startPolling() {
   stopPolling();
-  const sendHeartbeat = async () => {
-    if (!streamId) return;
-    try {
-      await fetchJson(`/api/streams/${streamId}/heartbeat`, {
-        method: "POST",
-        cache: "no-store",
-      });
-    } catch (error) {
-      els.errorText.textContent = error.message;
-    }
-  };
-  sendHeartbeat();
   pollTimer = window.setInterval(async () => {
     if (!streamId) return;
     try {
@@ -348,24 +429,27 @@ function startPolling() {
   latencyTimer = window.setInterval(() => {
     syncPlayers();
     updateLatencyLabels();
-    if (latestPayload) updateSaving(latestPayload);
   }, 500);
-  heartbeatTimer = window.setInterval(sendHeartbeat, 2000);
+  heartbeatTimer = window.setInterval(async () => {
+    if (!streamId) return;
+    try {
+      await fetchJson(`/api/streams/${streamId}/heartbeat`, {
+        method: "POST",
+        cache: "no-store",
+      });
+    } catch (error) {
+      els.errorText.textContent = error.message;
+    }
+  }, 2000);
 }
 
 function stopPolling() {
-  if (pollTimer) {
-    window.clearInterval(pollTimer);
-    pollTimer = null;
-  }
-  if (latencyTimer) {
-    window.clearInterval(latencyTimer);
-    latencyTimer = null;
-  }
-  if (heartbeatTimer) {
-    window.clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
+  if (pollTimer) window.clearInterval(pollTimer);
+  if (latencyTimer) window.clearInterval(latencyTimer);
+  if (heartbeatTimer) window.clearInterval(heartbeatTimer);
+  pollTimer = null;
+  latencyTimer = null;
+  heartbeatTimer = null;
 }
 
 async function checkRuntime() {
@@ -373,14 +457,13 @@ async function checkRuntime() {
     const runtime = await fetchJson("/api/runtime", { cache: "no-store" });
     const variants = runtime.live_preview?.variants || [];
     if (
-      runtime.pipeline_version !== "v2.0.0" ||
-      runtime.live_preview?.frontend !== "apps/web" ||
-      runtime.live_preview?.preview_codec !== "h264" ||
-      !variants.includes("h264_native") ||
-      !variants.includes("h265_optimized")
+      runtime.app_version !== "2.1.0" ||
+      runtime.pipeline_version !== "v2.1.0" ||
+      variants.join(",") !== "source,h265_optimized"
     ) {
-      throw new Error("当前后端不是 V1.6 实时双路编码入口");
+      throw new Error("当前后端不是 V2.1.0 实时源码直流入口");
     }
+    renderConfig(runtime.live_preview?.h265_config);
     els.runtimeError.hidden = true;
     els.runtimeError.textContent = "";
     return true;
@@ -396,9 +479,6 @@ async function startStream(rtspUrl) {
   detachPlayers();
   setBusy(true);
   setLiveChip("starting");
-  els.streamStatus.textContent = "starting";
-  els.maskedUrl.textContent = "--";
-  els.outputStatus.textContent = "--";
   els.errorText.textContent = "--";
   try {
     const payload = await fetchJson("/api/streams", {
@@ -419,49 +499,75 @@ async function startStream(rtspUrl) {
 }
 
 async function stopStream() {
-  if (!streamId) return;
+  if (!streamId || stopping) return;
   const id = streamId;
+  stopping = true;
   stopPolling();
   streamId = null;
-  setBusy(false);
+  setLiveChip("stopping");
+  els.streamStatus.textContent = "stopping";
+  els.outputStatus.textContent = "正在停止并回收实时进程";
+  detachPlayers();
+  setBusy(true);
   try {
     updateStatus(await fetchJson(`/api/streams/${id}`, { method: "DELETE" }));
   } catch (error) {
-    els.errorText.textContent = error.message;
-    setLiveChip("failed");
+    if (error.status === 404) {
+      els.streamStatus.textContent = "stopped";
+      els.outputStatus.textContent = "后端会话已结束";
+      setLiveChip("stopped");
+    } else {
+      els.errorText.textContent = error.message;
+      setLiveChip("failed");
+    }
   } finally {
-    detachPlayers();
+    stopping = false;
+    setBusy(false);
     els.rtspInput.disabled = false;
   }
 }
 
-els.divider.addEventListener("mousedown", (event) => {
+function beginSplitDrag(event) {
+  if (dragging) return;
   dragging = true;
-  event.preventDefault();
-});
-window.addEventListener("mousemove", (event) => {
-  if (dragging) setSplit(posFromEvent(event.clientX));
-});
-window.addEventListener("mouseup", () => {
-  dragging = false;
-});
-els.divider.addEventListener("touchstart", () => {
-  dragging = true;
-}, { passive: true });
-els.divider.addEventListener("touchmove", (event) => {
-  if (dragging) setSplit(posFromEvent(event.touches[0].clientX));
-}, { passive: true });
-window.addEventListener("touchend", () => {
-  dragging = false;
-});
-els.divider.addEventListener("keydown", (event) => {
-  const current = Number.parseFloat(els.divider.style.left) || 50;
-  if (event.key === "ArrowLeft") {
-    setSplit(current - 2);
-    event.preventDefault();
+  wasPlayingBeforeDrag = playbackReady &&
+    !els.sourceVideo.paused &&
+    !els.h265Video.paused;
+  if (wasPlayingBeforeDrag) {
+    els.sourceVideo.pause();
+    els.h265Video.pause();
   }
-  if (event.key === "ArrowRight") {
-    setSplit(current + 2);
+  for (const video of [els.sourceVideo, els.h265Video]) video.playbackRate = 1;
+  els.stage.classList.add("dragging");
+  els.divider.setPointerCapture(event.pointerId);
+  setSplit(posFromEvent(event.clientX));
+  event.preventDefault();
+}
+
+function moveSplitDrag(event) {
+  if (!dragging) return;
+  setSplit(posFromEvent(event.clientX));
+  event.preventDefault();
+}
+
+function endSplitDrag(event) {
+  if (!dragging) return;
+  dragging = false;
+  els.stage.classList.remove("dragging");
+  if (els.divider.hasPointerCapture(event.pointerId)) {
+    els.divider.releasePointerCapture(event.pointerId);
+  }
+  if (wasPlayingBeforeDrag) playBoth();
+  wasPlayingBeforeDrag = false;
+}
+
+els.divider.addEventListener("pointerdown", beginSplitDrag);
+els.divider.addEventListener("pointermove", moveSplitDrag);
+els.divider.addEventListener("pointerup", endSplitDrag);
+els.divider.addEventListener("pointercancel", endSplitDrag);
+els.divider.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    setSplit(currentSplit + (event.key === "ArrowLeft" ? -2 : 2));
     event.preventDefault();
   }
 });
@@ -472,15 +578,13 @@ els.streamForm.addEventListener("submit", (event) => {
 });
 els.stopBtn.addEventListener("click", stopStream);
 els.playBtn.addEventListener("click", () => {
-  if (els.h264Video.paused && els.h265Video.paused) playBoth();
+  if (els.sourceVideo.paused && els.h265Video.paused) playBoth();
   else pauseBoth();
 });
-els.h264Video.addEventListener("pause", () => {
+els.sourceVideo.addEventListener("pause", () => {
   if (!els.h265Video.paused) pauseBoth();
 });
-els.h264Video.addEventListener("play", () => {
-  els.controls.classList.add("playing");
-});
+els.sourceVideo.addEventListener("play", () => els.controls.classList.add("playing"));
 window.addEventListener("pagehide", () => {
   if (!streamId) return;
   const id = streamId;

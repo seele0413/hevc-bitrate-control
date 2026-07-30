@@ -1,14 +1,12 @@
-"""本地 V1.6 两路编码验证台。"""
+"""V2.1.0 本地实时源码直流工具。"""
 
-from pathlib import Path
 import sys
 from typing import Optional
 
-from ..core.models import Toolchain
 from ..errors import ToolError
-from ..tools import check_capabilities, discover_toolchain
+from ..tools import PROJECT_ROOT, Toolchain, check_capabilities, discover_toolchain
 from .app import create_app
-from .jobs import JobManager
+from .streams import LiveStreamManager
 
 
 def run_web_server(
@@ -19,7 +17,7 @@ def run_web_server(
     if host != "127.0.0.1":
         raise ValueError("本地网页服务只允许监听 127.0.0.1")
     if port < 1 or port > 65535:
-        raise ValueError("端口必须在 1～65535 之间")
+        raise ValueError("端口必须在 1 到 65535 之间")
     try:
         import uvicorn
     except ImportError as exc:
@@ -31,12 +29,16 @@ def run_web_server(
         import asyncio
 
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    project_root = Path(__file__).resolve().parents[2]
-    app = create_app(
-        JobManager(
-            jobs_root=project_root / "work" / "web_jobs",
-            roi_config_path=project_root / "configs" / "camera-entrance-roi.json",
-            toolchain_factory=lambda: active_toolchain,
-        )
+
+    stream_manager = LiveStreamManager(
+        streams_root=PROJECT_ROOT / "work" / "live_streams",
+        toolchain_factory=lambda: active_toolchain,
     )
-    uvicorn.run(app, host=host, port=port)
+    try:
+        uvicorn.run(
+            create_app(stream_manager=stream_manager),
+            host=host,
+            port=port,
+        )
+    finally:
+        stream_manager.close()

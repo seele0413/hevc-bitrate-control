@@ -1,14 +1,21 @@
 import os
+import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
 from .errors import ToolError
-from .core.models import Toolchain
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class Toolchain:
+    ffmpeg: Path
+    ffprobe: Path
 
 
 def _find_executable(env_name: str, local_path: Path, command: str) -> Optional[Path]:
@@ -32,22 +39,14 @@ def discover_toolchain() -> Toolchain:
         PROJECT_ROOT / ".tools" / "ffmpeg" / "bin" / "ffprobe.exe",
         "ffprobe",
     )
-    configured_model = os.environ.get("HEVC_LAB_VMAF_MODEL")
-    model = (
-        Path(configured_model).resolve()
-        if configured_model
-        else PROJECT_ROOT / ".tools" / "vmaf" / "model" / "vmaf_v0.6.1.json"
-    )
     missing = []
     if not ffmpeg:
         missing.append("ffmpeg")
     if not ffprobe:
         missing.append("ffprobe")
-    if not model.is_file():
-        missing.append(f"VMAF 模型({model})")
     if missing:
         raise ToolError("缺少工具：" + "、".join(missing))
-    return Toolchain(ffmpeg=ffmpeg, ffprobe=ffprobe, vmaf_model=model.resolve())
+    return Toolchain(ffmpeg=ffmpeg, ffprobe=ffprobe)
 
 
 def run_process(
@@ -74,28 +73,38 @@ def run_process(
     return completed
 
 
+def _has_component(output: str, name: str) -> bool:
+    return re.search(rf"^\s*[A-Z.]+\s+{re.escape(name)}(?:\s|$)", output, re.MULTILINE) is not None
+
+
 def check_capabilities(toolchain: Toolchain) -> dict:
     version = run_process([toolchain.ffmpeg, "-hide_banner", "-version"]).stdout.splitlines()[0]
+    probe_version = run_process(
+        [toolchain.ffprobe, "-hide_banner", "-version"]
+    ).stdout.splitlines()[0]
     encoders = run_process([toolchain.ffmpeg, "-hide_banner", "-encoders"]).stdout
-    filters = run_process([toolchain.ffmpeg, "-hide_banner", "-filters"]).stdout
-    if "libx265" not in encoders:
+    decoders = run_process([toolchain.ffmpeg, "-hide_banner", "-decoders"]).stdout
+    muxers = run_process([toolchain.ffmpeg, "-hide_banner", "-muxers"]).stdout
+    demuxers = run_process([toolchain.ffmpeg, "-hide_banner", "-demuxers"]).stdout
+    protocols = run_process([toolchain.ffmpeg, "-hide_banner", "-protocols"]).stdout
+
+    if not _has_component(encoders, "libx265"):
         raise ToolError("当前 FFmpeg 不包含 libx265 编码器")
-    if "libx264" not in encoders:
-        raise ToolError("当前 FFmpeg 不包含 libx264 编码器，无法生成浏览器 H.264 预览")
-    if "libvmaf" not in filters:
-        raise ToolError("当前 FFmpeg 不包含 libvmaf 滤镜")
-    if "addroi" not in filters:
-        raise ToolError("当前 FFmpeg 不包含 addroi 滤镜")
-    if "hqdn3d" not in filters:
-        raise ToolError("当前 FFmpeg 不包含 hqdn3d 滤镜")
-    probe_version = run_process([toolchain.ffprobe, "-hide_banner", "-version"]).stdout.splitlines()[0]
+    if not _has_component(encoders, "libx264"):
+        raise ToolError("当前 FFmpeg 不包含 libx264 编码器，无法生成浏览器预览")
+    if not _has_component(decoders, "h264"):
+        raise ToolError("当前 FFmpeg 不包含 H.264 解码器")
+    if not _has_component(muxers, "hls"):
+        raise ToolError("当前 FFmpeg 不包含 HLS muxer")
+    if not _has_component(demuxers, "rtsp") and "rtsp" not in protocols:
+        raise ToolError("当前 FFmpeg 不支持 RTSP 输入")
+
     return {
         "ffmpeg": version,
         "ffprobe": probe_version,
         "libx265": True,
-        "libx264": True,
-        "libvmaf": True,
-        "addroi": True,
-        "hqdn3d": True,
-        "vmaf_model": str(toolchain.vmaf_model),
+        "libx264_preview": True,
+        "h264_decoder": True,
+        "rtsp_input": True,
+        "hls_muxer": True,
     }

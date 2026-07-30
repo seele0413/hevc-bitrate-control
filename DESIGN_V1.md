@@ -1,80 +1,67 @@
-# H.264 原生编码与 V2.0 H.265 固定参数研究工具
+# V2.1.0 实时源码直流设计
 
-> 当前实现版本：v2.0.0
-> `## 0. v1.6.0 当前唯一方案` 是当前唯一有效方案。V1.4 预算中性 ROI、V1.3 四路策略、V1.2 激进三档和更早设计均为历史研究记录，不得覆盖本节。
+> 当前实现版本：v2.1.0。本文全文是当前唯一有效方案。
 
-## 0. v1.6.0 当前唯一方案
+## 1. 输入与输出
 
-### 0.1 研究目标
+系统只接受一个 H.264 RTSP 视频地址。探测到其他视频编码时返回 HTTP 400，不转换、不降级；音频不进入处理链路。
 
-程序对同一个输入参考视频独立生成两个结果：
+固定输出为：
 
-1. `default_h264.mp4`：H.264 原生编码，只指定 `libx264`，不传自定义 CRF、preset、AQ、ROI、降噪或帧间参数。
-2. `hevc_fixed.mp4`：H.265 固定参数方案。
+| variant | 实际处理 | 浏览器画面 | 码率证据 |
+|---|---|---|---|
+| `source` | H.264 elementary stream 原样重封装 | H.264 HLS 直通 | 分发前的 H.264 字节 |
+| `h265_optimized` | 固定参数 `libx265` 编码 | 后续 `libx264` 仅观看预览 | 预览转换前的 H.265 字节 |
 
-H.265 固定参数方案必须严格使用：
-
-```text
-CRF 36.0 · preset fast · GOP 2-10s · ref 4 · b-frames 4 · lookahead 45 · 无roi · 无降噪
-```
-
-V1.6 不执行 CRF 搜索、不做 CRF 配对、不计算 VMAF/SSIM 差值配对、不使用 ROI、不使用分区降噪、不评选胜出方案，也不输出部署结论。
-
-### 0.2 策略映射
-
-| 公开策略 | 编码器 | preset | CRF | 帧间结构 | 区域处理 |
-|---|---|---|---:|---|---|
-| H.264 原生编码 | `libx264` | 原生默认 | 原生默认 | 原生默认 | 无 |
-| H.265 固定参数方案 | `libx265` | `fast` | 36.0 | ref=4 / bframes=4 / lookahead=45 / GOP=10秒 / min=2秒 | 无 ROI、无降噪 |
-
-H.265 固定参数方案沿用 Main 8-bit、`yuv420p`、源分辨率、源帧率、源帧数和源时长。视频码率统一按 `v:0` 视频流压缩包字节统计，音频和容器开销不参与核心比较。
-
-### 0.3 输出与报告
-
-公开输出：
-
-- `default_h264.mp4`
-- `hevc_fixed.mp4`
-- `final_metrics.csv`
-- `final_summary.md`
-- `research_manifest.json`
-
-报告展示分辨率、平均视频包码率、CRF、VMAF/P5/SSIM、编码速度和相对 H.264 原生编码的节省百分比。负节省必须保留，表示码率增加；它不是胜出或部署结论。
-
-### 0.4 正式接口
-
-```powershell
-python -m hevc_lab multi-encode `
-  --input 'F:\work\课题\监控素材.mp4' `
-  --output '.\results\monitor-v1_6'
-```
-
-`--roi-config` 仅为兼容旧命令保留；V1.6 不读取 ROI 配置。
-
-### 0.5 本地 Web 界面
-
-本地 Web 首页位于 `apps/web`。实时预览页面只接收一个原始 RTSP 地址，后端对其生成两路本机二次编码输出：`h264_native` 为只指定 `libx264` 的 H.264 原生参数编码，`h265_optimized` 为 V1.6 H.265 固定参数优化编码。
-
-实时后端先用一个持续 RTSP 连接解码源画面，再通过容量为 2 帧的共享队列把同一组帧送入两路原生编码器。队列满时删除最旧帧，保持接近直播边界。H.264 路只指定 `libx264`；H.265 路保持 V1.6 固定参数。两路原生编码输出在任何预览转码之前独立统计最近 30 秒编码字节和节省率。
-
-浏览器不直接播放原生 H.264/H.265 输出。后端分别解码两路原生码流，再统一使用 `libx264 ultrafast / CRF 18 / zerolatency / 1 秒 GOP` 输出 H.264 MPEG-TS HLS 等价预览；两路预览参数必须一致，预览码率不得进入核心码率比较。HLS 保留 10 个分片；前端不等待固定 5 秒缓存，偏差超过 0.5 秒时回到共同直播边界附近。页面每 2 秒发送独立心跳，状态轮询和 HLS 请求也刷新租约；连续 30 秒无页面活动时停止整组进程。播放器发生致命错误后必须允许重新连接。实时页不生成 60 秒或其他固定时长样本报告。实时预览延迟属于本机二次编码链路，不得表述为摄像头端一次编码部署延迟。页面不得回显未脱敏 RTSP 地址。
-
-任务状态至少包括：
+## 2. 数据流
 
 ```text
-queued
-preparing_reference
-encoding_h264_native
-encoding_hevc_fixed
-generating_previews
-completed
-failed
+H.264 RTSP
+  -> 单一 FFmpeg 连接，copy 为 H.264 elementary stream
+  -> Python 统计一次源字节
+     -> 原字节写入 HLS 重封装进程，-c:v copy
+     -> 原字节写入 H.264 解码进程，输出 yuv420p
+        -> 约 5 秒 / 最大 512 MiB 阻塞队列
+        -> 固定参数 libx265
+        -> Python 统计 H.265 字节
+        -> libx264 仅观看 HLS 预览
 ```
 
-### 0.6 静态展示页
+分发和编码写入必须处理管道短写。任何写入、读取或子进程退出都会设置会话停止事件并统一终止五个 FFmpeg 进程。
 
-`apps/demo` 是 Cloudflare Pages 纯静态展示版。页面的蓝色 H.265 参数标签应固定在分割竖线右侧紧贴显示；当竖线接近右侧边界时，标签由 `.stage { overflow: hidden; }` 自然裁切，不设置拉伸宽度或换行。
+## 3. H.265 唯一参数
 
-## 1. 历史研究边界
+配置只定义在 `hevc_lab/config.py`：CRF 36.0、preset fast、Main、`yuv420p`、ref 4、bframes 4、b-adapt 2、lookahead 45、GOP 10 秒、min GOP 2 秒、scenecut 40、cutree、weightp 和固定 AQ2。帧单位的 keyint 根据探测帧率计算。
 
-V1.4 预算中性 ROI、V1.3 四路重构、V1.2 激进三档、`roi-study`、`denoise-study`、`compare` 等能力仍可作为历史研究命令保留，但不属于 V1.6 正式入口。任何历史软件 x265 结果都不能表述为摄像头硬件实机验证成功。
+实时命令、流状态的 `fixed_config` 和 `/api/runtime` 的 `h265_config` 必须读取同一个配置对象。
+
+## 4. 码率与状态
+
+两路码率都按 elementary stream 字节计算，窗口固定为最近 30 秒。源码在分发到两个消费者之前只计数一次；预览编码字节、音频和 HLS 容器开销均不计入。
+
+```text
+bandwidth_saving_pct = (source_bitrate - h265_bitrate) / source_bitrate * 100
+```
+
+负值原样返回，网页显示为“码率增加”。状态同时提供两路窗口码率、窗口字节数、H.265 编码速度、编码积压、队列深度和固定 `saving_basis`。
+
+## 5. HLS 与生命周期
+
+- 源码 HLS 使用摄像头原关键帧切片；不以重新编码修正长 GOP。
+- 8 秒仍未生成源码播放列表时返回启动/延迟告警。
+- 两路 HLS 保留 20 个分片；H.265 预览使用 `libx264 ultrafast / CRF 18 / zerolatency / 1 秒 GOP`。
+- 页面等待两路约 5 秒共同缓冲后播放，以 `0.98-1.02x` 调速同步，偏差超过 3 秒才重新定位。
+- 浏览器播放延迟与 H.265 编码积压分别展示。
+- 同时只允许一个活动会话；页面心跳租约为 10 秒。
+- 页面停止、租约超时或任一子进程退出时回收所有进程和管道。
+
+## 6. 安全与接口
+
+`POST /api/streams` 的 JSON 只允许一个 `rtsp_url` 字段。状态、错误和日志只保留脱敏地址，不得包含用户名、密码、完整路径、query 或 fragment。HLS 文件路由只接受固定 variant 下的 `.m3u8` 与 `.ts` 单层文件名，并验证解析后路径仍位于会话目录。
+
+CLI 只提供：
+
+```text
+python -m hevc_lab check-env
+python -m hevc_lab web --host 127.0.0.1 --port 8000
+```

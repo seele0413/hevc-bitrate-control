@@ -1,76 +1,61 @@
-# H.264 原生编码与 V2.0 H.265 固定参数研究工具
+# V2.1.0 H.264 源码直流与 H.265 实时编码工具
 
-当前版本为 **v2.0.0**。正式入口 `multi-encode` 只生成两路结果：
+这是一个本机实时 Web 工具，只接受 H.264 RTSP 视频。
 
-- `default_h264.mp4`：只指定 `libx264`，保留 FFmpeg/libx264 原生默认参数。
-- `hevc_fixed.mp4`：固定 H.265 参数方案，参数为 `CRF 36.0 · preset fast · GOP 2-10s · ref 4 · b-frames 4 · lookahead 45 · 无roi · 无降噪`。
+- 左路：原始 H.264 elementary stream，按字节统计后以 `-c:v copy` 重封装为 HLS。
+- 右路：同一源流解码后，以固定参数实时编码 H.265；H.265 字节先统计，再转换为 H.264 HLS 供浏览器观看。
+- 码率：两路都按最近 30 秒 elementary stream 字节计算，HLS 容器和右路观看预览不计入。
 
-V1.6 不做 CRF 搜索、不做 ROI、不做降噪、不评选胜出方案，也不输出摄像头部署结论。码率节省百分比只作为数据记录；负数必须保留，表示 H.265 固定参数方案相对 H.264 原生编码码率增加。
-
-## 使用方法
-
-在项目根目录打开 PowerShell，先检查环境：
+## 环境检查
 
 ```powershell
 & 'C:\Users\31969\AppData\Local\Programs\Python\Python39\python.exe' -m hevc_lab check-env
 ```
 
-执行 V1.6 两路编码：
+环境只需要 FFmpeg、FFprobe、H.264 解码、`libx265`、用于浏览器预览的 `libx264`、RTSP 输入和 HLS 输出。
 
-```powershell
-& 'C:\Users\31969\AppData\Local\Programs\Python\Python39\python.exe' -m hevc_lab multi-encode `
-  --input 'F:\work\课题\监控素材.mp4' `
-  --output '.\results\monitor-v1_6'
-```
-
-`--roi-config` 仍可传入以兼容旧命令行，但 V1.6 正式流程不会读取 ROI 配置，也不会生成 `addroi` 或 `hqdn3d` 分区降噪。
-
-输出包括：
-
-- `default_h264.mp4`
-- `hevc_fixed.mp4`
-- `final_metrics.csv`
-- `final_summary.md`
-- `research_manifest.json`
-
-视频码率按 `v:0` 视频流压缩包字节计算，音频和容器开销不进入核心比较。
-
-## 本地 Web
-
-启动本地网页：
+## 启动网页
 
 ```powershell
 & 'C:\Users\31969\AppData\Local\Programs\Python\Python39\python.exe' -m hevc_lab web --host 127.0.0.1 --port 8000
 ```
 
-然后打开：
+打开 `http://127.0.0.1:8000/`，输入 H.264 RTSP 地址。服务固定只监听本机地址，同时只运行一个实时会话。
+
+也可以双击 `start_web.cmd` 启动。
+
+## 固定 H.265 参数
 
 ```text
-http://127.0.0.1:8000/
+CRF 36.0 · preset fast · Main 8-bit · yuv420p
+ref 4 · bframes 4 · b-adapt 2 · lookahead 45
+GOP 10 秒 · min GOP 2 秒 · scenecut 40
+cutree · weightp · AQ2
 ```
 
-本地首页挂载 `apps/web`，用于单 RTSP 输入的双路实时二次编码预览。后端只持续拉取并解码一次源流，把同一组帧送入 `h264_native`（只指定 `libx264`）与 `h265_optimized`（V1.6 H.265 固定参数）。两路原生编码字节在预览转码前按最近 30 秒统计码率与节省率。
+唯一配置源是 `hevc_lab/config.py`。
 
-浏览器不直接接收 HEVC。两路原生结果分别解码后，统一使用同一套低延迟 H.264 参数生成 HLS 等价预览，从而避免浏览器 HEVC MSE/HLS 不兼容导致的黑屏。实时链路使用 2 帧队列，队列满时丢弃最旧帧；HLS 保留 10 个 1 秒分片，前端不再等待 5 秒后起播，并在两路偏差超过 0.5 秒时校正到共同直播边界附近。页面状态轮询、独立心跳和 HLS 分片请求都会刷新会话租约；连续 30 秒没有任何页面活动时才回收该会话的全部 FFmpeg。HLS 播放器发生致命错误后会清除挂载状态并在后续轮询中重新连接。实时页不生成固定时长样本报告。
+## 实时接口
 
-实时预览延迟属于本机二次编码链路，不等同于摄像头端一次编码部署延迟；本页面用于观察黑屏、卡顿、码率和预览延迟风险，不生成摄像头部署结论。
+- `GET /api/health`
+- `GET /api/runtime`
+- `POST /api/streams`，请求体只允许 `{"rtsp_url": "rtsp://..."}`
+- `GET /api/streams/{stream_id}`
+- `DELETE /api/streams/{stream_id}`
+- `POST /api/streams/{stream_id}/heartbeat`
+- `POST /api/streams/{stream_id}/stop`
+- `GET /api/streams/{stream_id}/hls/{variant}/{filename}`
 
-RTSP 地址可能包含账号密码，程序不会在状态接口回显完整地址；不要把真实 RTSP 地址写入 Git、公开文档或报告。
+variant 固定为 `source` 与 `h265_optimized`。状态响应提供两路播放列表、两路滚动码率与字节数、H.265 编码速度和积压、队列状态及 `bandwidth_saving_pct`。负百分比表示码率增加。
 
-## Cloudflare Pages 静态展示版
+RTSP 地址在日志和状态中会删除凭据、完整路径、query 与 fragment。不要把真实地址写入代码、文档或测试。
 
-纯静态展示入口位于 `apps/demo/`，不上传视频、不编码视频、不调用 FastAPI，也不依赖 Python 或 FFmpeg。它从 `data/results.json` 读取 V1.6 展示数据，蓝色参数标签固定在分割竖线右侧，接近右边界时由父容器自然裁切，不拉伸。
+## 验证
 
-Cloudflare Pages 配置：
-
-```text
-Framework preset: None
-Build command: echo "no build"
-Build output directory: apps/demo
+```powershell
+& 'C:\Users\31969\AppData\Local\Programs\Python\Python39\python.exe' -m compileall -q hevc_lab tests
+& 'C:\Users\31969\AppData\Local\Programs\Python\Python39\python.exe' -m unittest discover -v
+node --check apps\web\app.js
 ```
 
-## 边界
-
-- V1.6 只验证软件编码工具链下的 H.264 原生与 H.265 固定参数输出，不代表摄像头硬件实机已经验证成功。
-- 上传的 MP4/MKV 是压缩后的输入参考视频，不称为传感器原始帧。
-- 历史 `compare`、`search-crf`、`roi-study`、`denoise-study` 等研究命令保留用于复核旧实验，但不属于 V1.6 正式入口。
+`work/` 中已有用户结果不会被自动删除，但当前程序不会读取这些旧结果。
