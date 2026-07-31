@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
 
+from hevc_lab.config import DENOISE_CONFIG
 from hevc_lab.tools import discover_toolchain
 from hevc_lab.web.streams import LiveStreamManager
 
@@ -100,8 +101,9 @@ class RealFfmpegPipelineTests(unittest.TestCase):
                 self.assertEqual(
                     status["saving_basis"],
                     "source_h264_elementary_stream_bytes_vs_"
-                    "h265_elementary_stream_bytes_rolling_30s",
+                    "denoised_h265_elementary_stream_bytes_rolling_30s",
                 )
+                self.assertEqual(status["denoise_config"], DENOISE_CONFIG.public_dict())
 
                 for variant in ("source", "h265_optimized"):
                     playlist = stream.outputs[variant].playlist_path

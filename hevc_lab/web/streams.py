@@ -14,17 +14,18 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
-from ..config import HEVC_CONFIG
+from ..config import DENOISE_CONFIG, HEVC_CONFIG
 from ..tools import Toolchain, discover_toolchain
 
 
-STREAM_PIPELINE_VERSION = "v2.2.0"
+STREAM_PIPELINE_VERSION = "v2.3.0"
 LIVE_STREAM_STATUSES = ("starting", "running", "failed", "stopped")
 LIVE_VARIANTS = ("source", "h265_optimized")
 HLS_PLAYLIST = "live.m3u8"
 HLS_SEGMENT_PATTERN = "segment_%05d.ts"
 HLS_ALLOWED_SUFFIXES = {".m3u8", ".ts"}
 HLS_SEGMENT_SECONDS = 1
+H265_PREVIEW_HLS_SEGMENT_SECONDS = 0.5
 HLS_PLAYLIST_SEGMENTS = 60
 BITRATE_WINDOW_SECONDS = 30.0
 LIVE_BUFFER_SECONDS = 5.0
@@ -36,8 +37,14 @@ PROCESS_TERMINATE_TIMEOUT_SECONDS = 5.0
 THREAD_JOIN_TIMEOUT_SECONDS = 3.0
 PREVIEW_CRF = 21
 PREVIEW_PRESET = "ultrafast"
-PLAYBACK_TARGET_DELAY_SECONDS = 10.0
-PLAYBACK_RECOVERY_BUFFER_SECONDS = 3.0
+PLAYBACK_TARGET_DELAY_SECONDS = 0.0
+PLAYBACK_RECOVERY_BUFFER_SECONDS = 1.0
+PLAYBACK_POLICY = "independent_rtsp_realtime_delay"
+PLAYBACK_REFERENCE = "rtsp_wall_clock_elapsed_since_first_source_byte"
+SAVING_BASIS = (
+    "source_h264_elementary_stream_bytes_vs_"
+    "denoised_h265_elementary_stream_bytes_rolling_30s"
+)
 
 ToolchainFactory = Callable[[], Toolchain]
 ProcessFactory = Callable[..., subprocess.Popen]
@@ -246,6 +253,7 @@ class LiveStream:
     delivered_frames: int = 0
     dropped_frames: int = 0
     last_heartbeat_at: float = field(default_factory=time.monotonic, repr=False)
+    rtsp_reference_monotonic: Optional[float] = field(default=None, repr=False)
     cleanup_started: bool = field(default=False, repr=False)
     cleanup_finished: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -286,6 +294,11 @@ class LiveStream:
             return None
         return ((source - h265) / source) * 100
 
+    def rtsp_realtime_elapsed_seconds(self) -> Optional[float]:
+        if self.rtsp_reference_monotonic is None:
+            return None
+        return max(0.0, time.monotonic() - self.rtsp_reference_monotonic)
+
     def _current_warnings(self) -> List[str]:
         warnings = list(self.warnings)
         source = self.outputs["source"]
@@ -316,6 +329,7 @@ class LiveStream:
             "stream_id": self.stream_id,
             "status": self.status,
             "masked_url": self.masked_url,
+            "rtsp_realtime_elapsed_seconds": self.rtsp_realtime_elapsed_seconds(),
             "source_playlist_url": self.playlist_url("source"),
             "h265_optimized_playlist_url": self.playlist_url("h265_optimized"),
             "probes": {
@@ -323,10 +337,8 @@ class LiveStream:
                 for variant, output in self.outputs.items()
             },
             "bandwidth_saving_pct": self.bandwidth_saving_pct(),
-            "saving_basis": (
-                "source_h264_elementary_stream_bytes_vs_"
-                "h265_elementary_stream_bytes_rolling_30s"
-            ),
+            "saving_basis": SAVING_BASIS,
+            "denoise_config": DENOISE_CONFIG.public_dict(),
             "source_elementary_bitrate_mbps": source_metrics[
                 "elementary_bitrate_mbps"
             ],
@@ -352,12 +364,17 @@ class LiveStream:
                 "capacity_seconds": capacity_seconds,
             },
             "playback": {
-                "policy": "fixed_delay_continuity_first",
+                "policy": PLAYBACK_POLICY,
+                "reference": PLAYBACK_REFERENCE,
                 "target_delay_seconds": PLAYBACK_TARGET_DELAY_SECONDS,
                 "recovery_buffer_seconds": PLAYBACK_RECOVERY_BUFFER_SECONDS,
                 "hls_segment_seconds": HLS_SEGMENT_SECONDS,
+                "h265_preview_hls_segment_seconds": H265_PREVIEW_HLS_SEGMENT_SECONDS,
                 "hls_playlist_segments": HLS_PLAYLIST_SEGMENTS,
                 "hls_retention_seconds": HLS_SEGMENT_SECONDS * HLS_PLAYLIST_SEGMENTS,
+                "h265_preview_hls_retention_seconds": (
+                    H265_PREVIEW_HLS_SEGMENT_SECONDS * HLS_PLAYLIST_SEGMENTS
+                ),
                 "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS,
             },
             "warnings": self._current_warnings(),
@@ -474,7 +491,7 @@ class LiveStreamManager:
             ),
             "h265_optimized": StreamOutput(
                 variant="h265_optimized",
-                title="H.265 固定参数编码",
+                title="H.265 固定编码 · 轻度降噪",
                 preview_dir=stream_dir / "h265_optimized",
                 probe={
                     **source_probe,
@@ -674,6 +691,9 @@ class LiveStreamManager:
                 if not stream.stop_event.is_set():
                     self._mark_failed(stream, "RTSP 源码流已中断")
                 return
+            with self._lock:
+                if stream.rtsp_reference_monotonic is None:
+                    stream.rtsp_reference_monotonic = time.monotonic()
             stream.outputs["source"].bitrate.add(len(chunk))
             try:
                 self._write_all(source_stdin, chunk)
@@ -1124,6 +1144,8 @@ class LiveStreamManager:
             "-map",
             "0:v:0",
             "-an",
+            "-vf",
+            DENOISE_CONFIG.ffmpeg_filter(),
             "-pix_fmt",
             "yuv420p",
             "-f",
@@ -1174,7 +1196,7 @@ class LiveStreamManager:
     def _h265_preview_command(self, toolchain: Toolchain, stream: LiveStream) -> List[Any]:
         output = stream.outputs["h265_optimized"]
         fps = float(stream.source_probe["fps"])
-        gop = max(1, round(fps))
+        preview_gop = max(1, round(fps * H265_PREVIEW_HLS_SEGMENT_SECONDS))
         return [
             toolchain.ffmpeg,
             "-hide_banner",
@@ -1198,15 +1220,15 @@ class LiveStreamManager:
             "-pix_fmt",
             "yuv420p",
             "-g",
-            str(gop),
+            str(preview_gop),
             "-keyint_min",
-            str(gop),
+            str(preview_gop),
             "-sc_threshold",
             "0",
             "-f",
             "hls",
             "-hls_time",
-            str(HLS_SEGMENT_SECONDS),
+            str(H265_PREVIEW_HLS_SEGMENT_SECONDS),
             "-hls_list_size",
             str(HLS_PLAYLIST_SEGMENTS),
             "-hls_flags",

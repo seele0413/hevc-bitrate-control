@@ -3,17 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>V2.2.0 实时源码直流</title>
+    <title>V2.3.0 实时源码直流与轻度降噪</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/styles.css?v=2.2.0" />
+    <link rel="stylesheet" href="/styles.css?v=2.3.0" />
   </head>
   <body>
     <main class="workspace">
       <header class="app-header">
         <div class="brand">
-          <span class="eyebrow">V2.2.0 实时控制台</span>
-          <h1>H.264 源码直流与 H.265 固定编码</h1>
-          <p class="subtitle">H.264 / H.265 实时码率、延迟与队列状态</p>
+          <span class="eyebrow">V2.3.0 实时控制台</span>
+          <h1>H.264 源码直流与轻度降噪 H.265 编码</h1>
+          <p class="subtitle">源码 H.264 与“轻度降噪 + H.265”完整方案实时对比</p>
         </div>
         <div class="session-panel" aria-label="当前会话状态">
           <span class="session-label">会话</span>
@@ -53,21 +53,21 @@
           <div>分辨率 <span id="sourceResolution">--</span></div>
           <div>源码码率 <span class="hl" id="sourceBitrate">--</span></div>
           <div>30 秒字节 <span id="sourceBytes">--</span></div>
-          <div>播放延迟 <span id="sourceLatency">--</span></div>
+          <div>RTSP 滞后 <span id="sourceLatency">--</span></div>
         </div>
 
         <div class="label ours">
-          <div class="name">H.265 固定参数编码</div>
-          <div class="preview-flag">H.264 仅观看预览 · 不计码率</div>
+          <div class="name">H.265 固定编码 · 轻度降噪</div>
+          <div class="preview-flag">hqdn3d · H.264 仅观看预览 · 不计码率</div>
           <div>分辨率 <span id="h265Resolution">--</span></div>
           <div>H.265 码率 <span class="hl" id="h265Bitrate">--</span></div>
-          <div>播放延迟 <span id="h265Latency">--</span></div>
+          <div>RTSP 滞后 <span id="h265Latency">--</span></div>
           <div>编码积压 <span id="h265Backlog">--</span></div>
         </div>
 
         <div class="divider" id="divider" tabindex="0" role="slider" aria-label="对比分割线" aria-valuenow="50" aria-valuemin="0" aria-valuemax="100">
           <div class="badge">
-            <span class="small" id="savingLabel">码率差</span>
+            <span class="small" id="savingLabel">方案差异</span>
             <span class="big" id="savingBadge">--</span>
           </div>
         </div>
@@ -83,8 +83,8 @@
           <span class="icon-pause" aria-hidden="true">Ⅱ</span>
         </button>
         <div class="control-copy">
-          <strong>双路同步播放</strong>
-          <span id="timeLabel">双路固定延迟 10 s / H.265 仅观看预览</span>
+          <strong>RTSP 基准播放</strong>
+          <span id="timeLabel">各路贴近最新安全边缘播放 / 安全缓冲 1s / 不强制同帧</span>
         </div>
         <div class="speed-readout">
           <span>H.265 处理状态</span>
@@ -99,7 +99,7 @@
             <span class="panel-kicker">固定编码参数</span>
             <h2>H.265 实时编码配置</h2>
           </div>
-          <p>运行时唯一配置</p>
+          <p>运行时唯一配置 · 节省结果包含降噪影响</p>
         </div>
         <div class="parameter-grid" id="configSummary">
           <div class="param-card">
@@ -125,6 +125,14 @@
           <div class="param-card">
             <span>GOP</span>
             <strong>2-10 秒 · scenecut 40</strong>
+          </div>
+          <div class="param-card">
+            <span>噪声抑制</span>
+            <strong>hqdn3d · 轻度保细节</strong>
+          </div>
+          <div class="param-card">
+            <span>降噪强度</span>
+            <strong>空间 Y/C 1.5/1.0 · 时间 Y/C 2.5/2.0</strong>
           </div>
         </div>
       </section>
@@ -173,6 +181,6 @@
     </main>
 
     <script src="/vendor/hls.min.js?v=1.5.17" defer></script>
-    <script src="/app.js?v=2.2.0" defer></script>
+    <script src="/app.js?v=2.3.0-denoise2" defer></script>
   </body>
 </html>

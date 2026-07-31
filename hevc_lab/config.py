@@ -3,6 +3,37 @@ from typing import Any, Dict, Optional
 
 
 @dataclass(frozen=True)
+class FixedDenoiseConfig:
+    enabled: bool = True
+    filter_name: str = "hqdn3d"
+    profile: str = "light_detail_preserving"
+    luma_spatial: float = 1.5
+    chroma_spatial: float = 1.0
+    luma_temporal: float = 2.5
+    chroma_temporal: float = 2.0
+    placement: str = "after_h264_decode_before_h265_frame_queue"
+
+    def ffmpeg_filter(self) -> str:
+        return (
+            f"{self.filter_name}="
+            f"{self.luma_spatial:.1f}:{self.chroma_spatial:.1f}:"
+            f"{self.luma_temporal:.1f}:{self.chroma_temporal:.1f}"
+        )
+
+    def public_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "filter": self.filter_name,
+            "profile": self.profile,
+            "luma_spatial": self.luma_spatial,
+            "chroma_spatial": self.chroma_spatial,
+            "luma_temporal": self.luma_temporal,
+            "chroma_temporal": self.chroma_temporal,
+            "placement": self.placement,
+        }
+
+
+@dataclass(frozen=True)
 class FixedHevcConfig:
     crf: float = 36.0
     preset: str = "fast"
@@ -51,4 +82,5 @@ class FixedHevcConfig:
         return result
 
 
+DENOISE_CONFIG = FixedDenoiseConfig()
 HEVC_CONFIG = FixedHevcConfig()

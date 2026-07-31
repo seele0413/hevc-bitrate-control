@@ -9,16 +9,18 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from hevc_lab.config import HEVC_CONFIG
+from hevc_lab.config import DENOISE_CONFIG, HEVC_CONFIG
 from hevc_lab.tools import Toolchain
 from hevc_lab.web.streams import (
     HEARTBEAT_TIMEOUT_SECONDS,
+    H265_PREVIEW_HLS_SEGMENT_SECONDS,
     HLS_PLAYLIST_SEGMENTS,
     LiveStream,
     LiveStreamManager,
     PLAYBACK_RECOVERY_BUFFER_SECONDS,
     PLAYBACK_TARGET_DELAY_SECONDS,
     RollingBitrate,
+    SAVING_BASIS,
     StreamNotFound,
     StreamOutput,
     _mask_rtsp_url,
@@ -152,9 +154,16 @@ class StreamManagerTests(unittest.TestCase):
             if str(stream.outputs["h265_optimized"].playlist_path) in command
         )
         h265_encoder = next(command for command in commands if "libx265" in command)
+        decoder = next(
+            command
+            for command in commands
+            if "rawvideo" in command and "libx265" not in command
+        )
 
         self.assertEqual(source_hls[source_hls.index("-c:v") + 1], "copy")
         self.assertNotIn("libx264", source_hls)
+        self.assertNotIn("hqdn3d", " ".join(source_hls))
+        self.assertEqual(source_hls[source_hls.index("-hls_time") + 1], "1")
         self.assertEqual(
             source_hls[source_hls.index("-hls_list_size") + 1],
             str(HLS_PLAYLIST_SEGMENTS),
@@ -165,7 +174,25 @@ class StreamManagerTests(unittest.TestCase):
             str(HLS_PLAYLIST_SEGMENTS),
         )
         self.assertEqual(sum(command.count("libx264") for command in commands), 1)
+        self.assertEqual(
+            sum(DENOISE_CONFIG.ffmpeg_filter() in command for command in commands),
+            1,
+        )
+        self.assertEqual(
+            decoder[decoder.index("-vf") + 1],
+            "hqdn3d=1.5:1.0:2.5:2.0",
+        )
         self.assertEqual(h265_preview[h265_preview.index("-crf") + 1], "21")
+        preview_gop = str(max(1, round(10 * H265_PREVIEW_HLS_SEGMENT_SECONDS)))
+        self.assertEqual(h265_preview[h265_preview.index("-g") + 1], preview_gop)
+        self.assertEqual(
+            h265_preview[h265_preview.index("-keyint_min") + 1],
+            preview_gop,
+        )
+        self.assertEqual(
+            h265_preview[h265_preview.index("-hls_time") + 1],
+            str(H265_PREVIEW_HLS_SEGMENT_SECONDS),
+        )
         self.assertEqual(h265_encoder[h265_encoder.index("-preset") + 1], "fast")
         self.assertIn("-nostats", h265_encoder)
         self.assertEqual(h265_encoder[h265_encoder.index("-crf") + 1], "36.0")
@@ -181,10 +208,22 @@ class StreamManagerTests(unittest.TestCase):
             expected_params,
         )
         status = stream.public_status()
+        self.assertEqual(status["saving_basis"], SAVING_BASIS)
+        self.assertEqual(status["denoise_config"], DENOISE_CONFIG.public_dict())
+        self.assertIsNone(status["rtsp_realtime_elapsed_seconds"])
+        self.assertEqual(status["playback"]["policy"], "independent_rtsp_realtime_delay")
+        self.assertEqual(
+            status["playback"]["reference"],
+            "rtsp_wall_clock_elapsed_since_first_source_byte",
+        )
         self.assertEqual(status["playback"]["target_delay_seconds"], PLAYBACK_TARGET_DELAY_SECONDS)
         self.assertEqual(
             status["playback"]["recovery_buffer_seconds"],
             PLAYBACK_RECOVERY_BUFFER_SECONDS,
+        )
+        self.assertEqual(
+            status["playback"]["h265_preview_hls_segment_seconds"],
+            H265_PREVIEW_HLS_SEGMENT_SECONDS,
         )
         self.assertEqual(status["playback"]["hls_playlist_segments"], HLS_PLAYLIST_SEGMENTS)
         self.assertEqual(status["playback"]["heartbeat_timeout_seconds"], HEARTBEAT_TIMEOUT_SECONDS)
@@ -217,6 +256,15 @@ class StreamManagerTests(unittest.TestCase):
         self.assertEqual(bytes(source_pipe.data), payload)
         self.assertEqual(bytes(decoder_pipe.data), payload)
         self.assertEqual(stream.outputs["source"].bitrate.snapshot()["bytes"], len(payload))
+        self.assertIsNotNone(stream.rtsp_reference_monotonic)
+        with patch(
+            "hevc_lab.web.streams.time.monotonic",
+            return_value=stream.rtsp_reference_monotonic + 4.25,
+        ):
+            self.assertAlmostEqual(
+                stream.public_status()["rtsp_realtime_elapsed_seconds"],
+                4.25,
+            )
 
     def test_rolling_window_and_negative_saving_are_preserved(self):
         bitrate = RollingBitrate(window_seconds=30.0)

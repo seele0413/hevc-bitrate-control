@@ -86,6 +86,7 @@ def check_capabilities(toolchain: Toolchain) -> dict:
     decoders = run_process([toolchain.ffmpeg, "-hide_banner", "-decoders"]).stdout
     muxers = run_process([toolchain.ffmpeg, "-hide_banner", "-muxers"]).stdout
     demuxers = run_process([toolchain.ffmpeg, "-hide_banner", "-demuxers"]).stdout
+    filters = run_process([toolchain.ffmpeg, "-hide_banner", "-filters"]).stdout
     protocols = run_process([toolchain.ffmpeg, "-hide_banner", "-protocols"]).stdout
 
     if not _has_component(encoders, "libx265"):
@@ -94,6 +95,8 @@ def check_capabilities(toolchain: Toolchain) -> dict:
         raise ToolError("当前 FFmpeg 不包含 libx264 编码器，无法生成浏览器预览")
     if not _has_component(decoders, "h264"):
         raise ToolError("当前 FFmpeg 不包含 H.264 解码器")
+    if not _has_component(filters, "hqdn3d"):
+        raise ToolError("当前 FFmpeg 不包含 hqdn3d 滤镜，无法执行固定轻度噪声抑制")
     if not _has_component(muxers, "hls"):
         raise ToolError("当前 FFmpeg 不包含 HLS muxer")
     if not _has_component(demuxers, "rtsp") and "rtsp" not in protocols:
@@ -105,6 +108,7 @@ def check_capabilities(toolchain: Toolchain) -> dict:
         "libx265": True,
         "libx264_preview": True,
         "h264_decoder": True,
+        "hqdn3d_denoise": True,
         "rtsp_input": True,
         "hls_muxer": True,
     }

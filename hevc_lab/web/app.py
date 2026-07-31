@@ -7,16 +7,20 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
-from ..config import HEVC_CONFIG
+from ..config import DENOISE_CONFIG, HEVC_CONFIG
 from ..tools import PROJECT_ROOT
 from .streams import (
     HEARTBEAT_TIMEOUT_SECONDS,
+    H265_PREVIEW_HLS_SEGMENT_SECONDS,
     HLS_PLAYLIST,
     HLS_PLAYLIST_SEGMENTS,
     HLS_SEGMENT_SECONDS,
     LIVE_VARIANTS,
+    PLAYBACK_POLICY,
+    PLAYBACK_REFERENCE,
     PLAYBACK_RECOVERY_BUFFER_SECONDS,
     PLAYBACK_TARGET_DELAY_SECONDS,
+    SAVING_BASIS,
     STREAM_PIPELINE_VERSION,
     LiveStreamManager,
     StreamLimitExceeded,
@@ -27,10 +31,6 @@ from .streams import (
 
 FRONTEND_ROOT = PROJECT_ROOT / "apps" / "web"
 DEFAULT_STREAMS_ROOT = PROJECT_ROOT / "work" / "live_streams"
-SAVING_BASIS = (
-    "source_h264_elementary_stream_bytes_vs_"
-    "h265_elementary_stream_bytes_rolling_30s"
-)
 
 
 def _rtsp_url_from_payload(payload: Dict[str, Any]) -> str:
@@ -72,7 +72,7 @@ def create_app(stream_manager: Optional[LiveStreamManager] = None) -> FastAPI:
                 active_stream_manager.close()
 
     app = FastAPI(
-        title="V2.2.0 H.264 源码直流与 H.265 实时编码工具",
+        title="V2.3.0 H.264 源码直流与轻度降噪 H.265 实时编码工具",
         version=__version__,
         lifespan=lifespan,
     )
@@ -98,13 +98,19 @@ def create_app(stream_manager: Optional[LiveStreamManager] = None) -> FastAPI:
                 "playlist": HLS_PLAYLIST,
                 "saving_basis": SAVING_BASIS,
                 "h265_config": HEVC_CONFIG.public_dict(),
+                "denoise_config": DENOISE_CONFIG.public_dict(),
                 "playback": {
-                    "policy": "fixed_delay_continuity_first",
+                    "policy": PLAYBACK_POLICY,
+                    "reference": PLAYBACK_REFERENCE,
                     "target_delay_seconds": PLAYBACK_TARGET_DELAY_SECONDS,
                     "recovery_buffer_seconds": PLAYBACK_RECOVERY_BUFFER_SECONDS,
                     "hls_segment_seconds": HLS_SEGMENT_SECONDS,
+                    "h265_preview_hls_segment_seconds": H265_PREVIEW_HLS_SEGMENT_SECONDS,
                     "hls_playlist_segments": HLS_PLAYLIST_SEGMENTS,
                     "hls_retention_seconds": HLS_SEGMENT_SECONDS * HLS_PLAYLIST_SEGMENTS,
+                    "h265_preview_hls_retention_seconds": (
+                        H265_PREVIEW_HLS_SEGMENT_SECONDS * HLS_PLAYLIST_SEGMENTS
+                    ),
                     "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS,
                 },
             },

@@ -1,4 +1,4 @@
-"""V2.2.0 本地实时源码直流工具。"""
+"""V2.3.0 本地实时源码直流与轻度降噪工具。"""
 
 import sys
 from typing import Optional
