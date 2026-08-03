@@ -52,3 +52,29 @@ class FixedHevcConfig:
 
 
 HEVC_CONFIG = FixedHevcConfig()
+
+
+@dataclass(frozen=True)
+class FixedBrowserPreviewConfig:
+    codec: str = "libx264"
+    preset: str = "ultrafast"
+    crf: int = 26
+    maxrate_mbps: float = 3.0
+    bufsize_mbits: float = 6.0
+    resolution: str = "source"
+    gop_seconds: float = 1.0
+    hls_segment_seconds: float = 1.0
+    preview_only: bool = True
+    included_in_bitrate_comparison: bool = False
+
+    def public_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def ffmpeg_maxrate(self) -> str:
+        return f"{self.maxrate_mbps:g}M"
+
+    def ffmpeg_bufsize(self) -> str:
+        return f"{self.bufsize_mbits:g}M"
+
+
+BROWSER_PREVIEW_CONFIG = FixedBrowserPreviewConfig()

@@ -3,17 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>V2.2.0 实时源码直流</title>
+    <title>V2.2.1 Remote Stable 实时源码直流</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/styles.css?v=2.2.0" />
+    <link rel="stylesheet" href="/styles.css?v=2.2.1" />
   </head>
   <body>
     <main class="workspace">
       <header class="app-header">
         <div class="brand">
-          <span class="eyebrow">V2.2.0 实时控制台</span>
+          <span class="eyebrow">V2.2.1 Remote Stable</span>
           <h1>H.264 源码直流与 H.265 固定编码</h1>
-          <p class="subtitle">H.264 / H.265 实时码率、延迟与队列状态</p>
+          <p class="subtitle">双路独立固定延迟 · 远程带宽与真实缓冲可观测</p>
         </div>
         <div class="session-panel" aria-label="当前会话状态">
           <span class="session-label">会话</span>
@@ -83,13 +83,47 @@
           <span class="icon-pause" aria-hidden="true">Ⅱ</span>
         </button>
         <div class="control-copy">
-          <strong>双路同步播放</strong>
-          <span id="timeLabel">双路固定延迟 10 s / H.265 仅观看预览</span>
+          <strong>双路独立固定延迟</strong>
+          <span id="timeLabel">源码 10 s / H.265 预览 15 s / 不强制同帧</span>
         </div>
         <div class="speed-readout">
           <span>H.265 处理状态</span>
           <strong id="encodeState">采样中</strong>
           <small id="encodeSpeed">处理节奏 --</small>
+        </div>
+      </section>
+
+      <section class="network-panel" aria-label="双路传输状态">
+        <div class="section-heading">
+          <div>
+            <span class="panel-kicker">浏览器实测</span>
+            <h2>双路传输与缓冲</h2>
+          </div>
+          <p>下载速度取最近 10 个完整分片；带宽余量低于 1.0x 会持续消耗缓冲</p>
+        </div>
+        <div class="network-grid">
+          <article class="network-card">
+            <h3>源码 H.264 · 目标延迟 10 s</h3>
+            <dl>
+              <div><dt>HLS 传输码率</dt><dd id="sourceTransportBitrate">--</dd></div>
+              <div><dt>实际缓冲</dt><dd id="sourceBuffered">--</dd></div>
+              <div><dt>下载速度</dt><dd id="sourceDownloadSpeed">--</dd></div>
+              <div><dt>带宽余量</dt><dd id="sourceBandwidthMargin">--</dd></div>
+              <div><dt>卡顿次数</dt><dd id="sourceStalls">0</dd></div>
+              <div><dt>播放状态</dt><dd id="sourceRecovery">等待起播</dd></div>
+            </dl>
+          </article>
+          <article class="network-card optimized">
+            <h3>H.265 观看预览 · 目标延迟 15 s</h3>
+            <dl>
+              <div><dt>HLS 传输码率</dt><dd id="h265TransportBitrate">--</dd></div>
+              <div><dt>实际缓冲</dt><dd id="h265Buffered">--</dd></div>
+              <div><dt>下载速度</dt><dd id="h265DownloadSpeed">--</dd></div>
+              <div><dt>带宽余量</dt><dd id="h265BandwidthMargin">--</dd></div>
+              <div><dt>卡顿次数</dt><dd id="h265Stalls">0</dd></div>
+              <div><dt>播放状态</dt><dd id="h265Recovery">等待起播</dd></div>
+            </dl>
+          </article>
         </div>
       </section>
 
@@ -173,6 +207,6 @@
     </main>
 
     <script src="/vendor/hls.min.js?v=1.5.17" defer></script>
-    <script src="/app.js?v=2.2.0" defer></script>
+    <script src="/app.js?v=2.2.1" defer></script>
   </body>
 </html>

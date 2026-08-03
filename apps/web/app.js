@@ -19,6 +19,18 @@ const els = {
   sourceLatency: document.querySelector("#sourceLatency"),
   h265Latency: document.querySelector("#h265Latency"),
   h265Backlog: document.querySelector("#h265Backlog"),
+  sourceTransportBitrate: document.querySelector("#sourceTransportBitrate"),
+  sourceBuffered: document.querySelector("#sourceBuffered"),
+  sourceDownloadSpeed: document.querySelector("#sourceDownloadSpeed"),
+  sourceBandwidthMargin: document.querySelector("#sourceBandwidthMargin"),
+  sourceStalls: document.querySelector("#sourceStalls"),
+  sourceRecovery: document.querySelector("#sourceRecovery"),
+  h265TransportBitrate: document.querySelector("#h265TransportBitrate"),
+  h265Buffered: document.querySelector("#h265Buffered"),
+  h265DownloadSpeed: document.querySelector("#h265DownloadSpeed"),
+  h265BandwidthMargin: document.querySelector("#h265BandwidthMargin"),
+  h265Stalls: document.querySelector("#h265Stalls"),
+  h265Recovery: document.querySelector("#h265Recovery"),
   controls: document.querySelector("#controls"),
   playBtn: document.querySelector("#playBtn"),
   liveChip: document.querySelector("#liveChip"),
@@ -37,12 +49,19 @@ const els = {
 };
 
 const players = { source: null, h265_optimized: null };
-const PLAYBACK_TARGET_DELAY_SECONDS = 10;
-const PLAYBACK_RECOVERY_BUFFER_SECONDS = 3;
+const playerEntries = [
+  { key: "source", video: els.sourceVideo, label: "源码路", targetDelay: 10 },
+  { key: "h265_optimized", video: els.h265Video, label: "H.265 预览路", targetDelay: 15 },
+];
+const playerStates = {
+  source: { ready: false, recovering: false, recoveryTargetTime: null, stallCount: 0, downloadSamples: [], transportBitrateMbps: null },
+  h265_optimized: { ready: false, recovering: false, recoveryTargetTime: null, stallCount: 0, downloadSamples: [], transportBitrateMbps: null },
+};
+const PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS = 1.5;
+const PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS = 8;
 const PLAYBACK_DELAY_TOLERANCE_SECONDS = 1;
-const SOFT_SYNC_THRESHOLD_SECONDS = 0.15;
-const HARD_SYNC_THRESHOLD_SECONDS = 3;
-const SYNC_GRACE_MS = 2000;
+const PLAYBACK_START_GRACE_MS = 2000;
+const PLAYER_DETACH_SETTLE_MS = 250;
 const SLOW_PLAYBACK_RATE = 0.98;
 const FAST_PLAYBACK_RATE = 1.02;
 const HLS_RETENTION_SECONDS = 60;
@@ -60,9 +79,6 @@ let h265PlaylistUrl = null;
 let playbackReady = false;
 let playbackStarted = false;
 let playbackStartedAt = null;
-let playbackRecovering = false;
-let recoveryTargetTime = null;
-let recoveryRelocated = false;
 let userPaused = false;
 let stopping = false;
 let splitFrame = null;
@@ -141,15 +157,81 @@ function setStartupMessage(message) {
 }
 
 function updatePlaybackLabel() {
-  if (playbackRecovering) {
-    els.timeLabel.textContent =
-      `双路缓冲恢复中 · 目标延迟 ${PLAYBACK_TARGET_DELAY_SECONDS} s`;
+  const recovering = playerEntries.filter(({ key }) => playerStates[key].recovering);
+  if (recovering.length) {
+    els.timeLabel.textContent = `${recovering.map(({ label }) => label).join("、")}独立缓冲恢复中 · 高水位 ${PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS} s`;
   } else if (userPaused) {
-    els.timeLabel.textContent =
-      `双路已暂停 · 固定延迟目标 ${PLAYBACK_TARGET_DELAY_SECONDS} s`;
+    els.timeLabel.textContent = "双路已手动暂停";
   } else {
-    els.timeLabel.textContent =
-      `双路固定延迟 ${PLAYBACK_TARGET_DELAY_SECONDS} s · H.265 仅观看预览`;
+    els.timeLabel.textContent = "源码 10 s / H.265 预览 15 s / 独立播放 · 不强制同帧";
+  }
+}
+
+function actualBufferedAhead(video) {
+  return bufferedAheadAt(video, video.currentTime);
+}
+
+function recordFragmentDownload(key, data) {
+  const stats = data?.stats || data?.frag?.stats || {};
+  const loaded = metricNumber(stats.loaded ?? stats.total);
+  const start = metricNumber(stats.loading?.start ?? stats.trequest);
+  const end = metricNumber(stats.loading?.end ?? stats.tload);
+  if (!Number.isFinite(loaded) || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return;
+  }
+  const state = playerStates[key];
+  state.downloadSamples.push({ bytes: loaded, milliseconds: end - start });
+  state.downloadSamples = state.downloadSamples.slice(-10);
+  updateNetworkTelemetry();
+}
+
+function downloadSpeedMbps(key) {
+  const samples = playerStates[key].downloadSamples;
+  const bytes = samples.reduce((sum, sample) => sum + sample.bytes, 0);
+  const milliseconds = samples.reduce((sum, sample) => sum + sample.milliseconds, 0);
+  return milliseconds > 0 ? bytes * 8 / milliseconds / 1000 : null;
+}
+
+function bandwidthMarginLabel(key) {
+  const bitrate = playerStates[key].transportBitrateMbps;
+  const speed = downloadSpeedMbps(key);
+  if (!Number.isFinite(bitrate) || bitrate <= 0 || !Number.isFinite(speed)) {
+    return { text: "--", className: "" };
+  }
+  const margin = speed / bitrate;
+  if (margin < 1) return { text: `${margin.toFixed(2)}x · 带宽不足`, className: "margin-insufficient" };
+  if (margin < 1.3) return { text: `${margin.toFixed(2)}x · 余量偏紧`, className: "margin-tight" };
+  return { text: `${margin.toFixed(2)}x · 余量充足`, className: "margin-healthy" };
+}
+
+function updateNetworkTelemetry() {
+  const nodes = {
+    source: {
+      transport: els.sourceTransportBitrate, buffered: els.sourceBuffered,
+      download: els.sourceDownloadSpeed, margin: els.sourceBandwidthMargin,
+      stalls: els.sourceStalls, recovery: els.sourceRecovery,
+    },
+    h265_optimized: {
+      transport: els.h265TransportBitrate, buffered: els.h265Buffered,
+      download: els.h265DownloadSpeed, margin: els.h265BandwidthMargin,
+      stalls: els.h265Stalls, recovery: els.h265Recovery,
+    },
+  };
+  for (const entry of playerEntries) {
+    const state = playerStates[entry.key];
+    const target = nodes[entry.key];
+    const speed = downloadSpeedMbps(entry.key);
+    const margin = bandwidthMarginLabel(entry.key);
+    target.transport.textContent = formatBitrate(state.transportBitrateMbps);
+    target.buffered.textContent = formatLatency(actualBufferedAhead(entry.video));
+    target.download.textContent = formatBitrate(speed);
+    target.margin.textContent = margin.text;
+    target.margin.classList.remove("margin-insufficient", "margin-tight", "margin-healthy");
+    if (margin.className) target.margin.classList.add(margin.className);
+    target.stalls.textContent = String(state.stallCount);
+    target.recovery.textContent = state.recovering
+      ? `恢复中 · 等待 ${PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS}s`
+      : (state.ready ? "独立播放" : "等待起播");
   }
 }
 
@@ -272,7 +354,7 @@ function configValue(value, suffix = "") {
   return `${value}${suffix}`;
 }
 
-function renderConfig(config) {
+function renderConfig(config, preview = {}, playback = {}) {
   if (!config || typeof config !== "object" || !els.configSummary) return;
   const crf = metricNumber(config.crf);
   const profile = String(config.profile || "main").toLowerCase() === "main"
@@ -293,6 +375,18 @@ function renderConfig(config) {
     [
       "GOP 与工具",
       `${configValue(config.min_gop_seconds)}-${configValue(config.gop_seconds)} 秒 · scenecut ${configValue(config.scenecut)} · cutree/weightp`,
+    ],
+    [
+      "浏览器预览",
+      `${configValue(preview.codec)} ${configValue(preview.preset)} · CRF ${configValue(preview.crf)} · ${configValue(preview.maxrate_mbps, "M")} 上限`,
+    ],
+    [
+      "独立播放",
+      `源码 ${configValue(playback.source_target_delay_seconds, "s")} · 预览 ${configValue(playback.h265_preview_target_delay_seconds, "s")}`,
+    ],
+    [
+      "恢复水位",
+      `低 ${configValue(playback.recovery_low_watermark_seconds, "s")} · 高 ${configValue(playback.recovery_high_watermark_seconds, "s")}`,
     ],
   ];
   els.configSummary.replaceChildren(
@@ -333,33 +427,23 @@ function playerTimeline(video) {
   return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
 }
 
-function commonPlaybackTimeline() {
-  const videos = [els.sourceVideo, els.h265Video];
-  const timelines = videos.map(playerTimeline);
-  if (timelines.some((timeline) => !timeline)) return null;
-  const start = Math.max(...timelines.map((timeline) => timeline.start));
-  const end = Math.min(...timelines.map((timeline) => timeline.end));
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
-  return { start, end, duration: end - start };
+function fixedDelayTarget(entry) {
+  const timeline = playerTimeline(entry.video);
+  if (!timeline || timeline.end - timeline.start < entry.targetDelay) return null;
+  const target = timeline.end - entry.targetDelay;
+  return target >= timeline.start && target <= timeline.end ? target : null;
 }
 
-function fixedDelayTarget(timeline) {
-  if (!timeline || timeline.duration < PLAYBACK_TARGET_DELAY_SECONDS) return null;
-  const latestSafe = timeline.end - PLAYBACK_RECOVERY_BUFFER_SECONDS;
-  const target = timeline.end - PLAYBACK_TARGET_DELAY_SECONDS;
-  if (!Number.isFinite(target) || target < timeline.start || target > latestSafe) return null;
-  return target;
+function targetInsideTimeline(target, timeline) {
+  return Number.isFinite(target) &&
+    Boolean(timeline) &&
+    target >= timeline.start &&
+    target <= timeline.end;
 }
 
-function setBothPlaybackRate(rate) {
-  for (const video of [els.sourceVideo, els.h265Video]) video.playbackRate = rate;
-}
-
-function seekBoth(target) {
-  for (const video of [els.sourceVideo, els.h265Video]) {
-    video.currentTime = target;
-    video.playbackRate = 1;
-  }
+function seekPlayer(video, target) {
+  video.currentTime = target;
+  video.playbackRate = 1;
 }
 
 function bufferedAheadAt(video, target) {
@@ -374,127 +458,142 @@ function bufferedAheadAt(video, target) {
   return 0;
 }
 
-function enterPlaybackRecovery(message) {
+function enterPlayerRecovery(key, message, countStall = false) {
   if (!playbackReady || userPaused || dragging || stopping) return;
-  if (!playbackRecovering) {
-    recoveryTargetTime = Math.min(els.sourceVideo.currentTime, els.h265Video.currentTime);
-    recoveryRelocated = false;
+  const entry = playerEntries.find((item) => item.key === key);
+  if (!entry) return;
+  const state = playerStates[key];
+  if (!state.recovering) {
+    state.recoveryTargetTime = fixedDelayTarget(entry);
+    if (countStall) state.stallCount += 1;
   }
-  playbackRecovering = true;
-  pauseBoth(false);
+  state.recovering = true;
+  entry.video.pause();
+  entry.video.playbackRate = 1;
   setStartupMessage(message);
   updatePlaybackLabel();
+  updateNetworkTelemetry();
 }
 
-function resumePlaybackWhenReady() {
-  if (!playbackRecovering) return false;
-  const timeline = commonPlaybackTimeline();
-  if (!timeline) return false;
-  let target = recoveryTargetTime;
-  const inWindow = Number.isFinite(target) &&
-    target >= timeline.start &&
-    target <= timeline.end - PLAYBACK_RECOVERY_BUFFER_SECONDS;
-  if (!inWindow) {
-    target = fixedDelayTarget(timeline);
-    recoveryTargetTime = target;
-    recoveryRelocated = true;
+function resumePlayerWhenReady(key) {
+  const entry = playerEntries.find((item) => item.key === key);
+  if (!entry) return false;
+  const state = playerStates[key];
+  if (!state.recovering) return false;
+  const timeline = playerTimeline(entry.video);
+  if (!targetInsideTimeline(state.recoveryTargetTime, timeline)) {
+    state.recoveryTargetTime = fixedDelayTarget(entry);
   }
-  if (!Number.isFinite(target)) return false;
-  target = Math.max(timeline.start, Math.min(target, timeline.end - PLAYBACK_RECOVERY_BUFFER_SECONDS));
-  if (timeline.end - target < PLAYBACK_RECOVERY_BUFFER_SECONDS) return false;
-  const needsSeek = [els.sourceVideo, els.h265Video].some(
-    (video) => Math.abs(video.currentTime - target) > 0.1,
-  );
-  if (needsSeek) seekBoth(target);
-  const hasCommonBuffer = [els.sourceVideo, els.h265Video].every(
-    (video) => video.readyState >= 3 &&
-      bufferedAheadAt(video, target) >= PLAYBACK_RECOVERY_BUFFER_SECONDS,
-  );
-  if (!hasCommonBuffer) return false;
-  playbackRecovering = false;
-  recoveryTargetTime = null;
-  setStartupMessage(recoveryRelocated
-    ? `远程播放窗口已更新，已回到固定 ${PLAYBACK_TARGET_DELAY_SECONDS} 秒延迟`
-    : "缓冲恢复，继续保持固定延迟播放");
-  recoveryRelocated = false;
+  const recoveryTarget = state.recoveryTargetTime;
+  if (!Number.isFinite(recoveryTarget)) return false;
+  if (bufferedAheadAt(entry.video, recoveryTarget) < PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS) {
+    return false;
+  }
+
+  // 先让一个固定目标积累到高水位，再检查当前固定延迟位置。这样不会
+  // 每次轮询都追逐移动的 live edge，也不会在恢复后落到越来越旧的位置。
+  const currentTarget = fixedDelayTarget(entry);
+  if (!Number.isFinite(currentTarget)) return false;
+  if (bufferedAheadAt(entry.video, currentTarget) < PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS) {
+    state.recoveryTargetTime = currentTarget;
+    return false;
+  }
+  if (Math.abs(entry.video.currentTime - currentTarget) > 0.1) {
+    seekPlayer(entry.video, currentTarget);
+  }
+  state.recovering = false;
+  state.recoveryTargetTime = null;
+  state.ready = true;
+  setStartupMessage(`${entry.label}已恢复 ${PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS} 秒实际缓冲`);
   updatePlaybackLabel();
-  if (!userPaused) playBoth(true);
+  updateNetworkTelemetry();
+  if (!userPaused) entry.video.play().catch(() => {});
   return true;
 }
 
 function maybeStartBufferedPlayback() {
   if (playbackReady) return true;
-  const timeline = commonPlaybackTimeline();
-  const target = fixedDelayTarget(timeline);
-  if (!Number.isFinite(target)) return false;
-  seekBoth(target);
+  let allReady = true;
+  for (const entry of playerEntries) {
+    const state = playerStates[entry.key];
+    const target = fixedDelayTarget(entry);
+    if (!Number.isFinite(target)) return false;
+    if (!Number.isFinite(state.recoveryTargetTime)) {
+      state.recoveryTargetTime = target;
+      seekPlayer(entry.video, target);
+    }
+    const recoveryTarget = state.recoveryTargetTime;
+    if (bufferedAheadAt(entry.video, recoveryTarget) < PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS) {
+      allReady = false;
+      continue;
+    }
+    const currentTarget = fixedDelayTarget(entry);
+    if (!Number.isFinite(currentTarget)) return false;
+    if (bufferedAheadAt(entry.video, currentTarget) < PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS) {
+      state.recoveryTargetTime = currentTarget;
+      allReady = false;
+      continue;
+    }
+    if (Math.abs(entry.video.currentTime - currentTarget) > 0.1) {
+      seekPlayer(entry.video, currentTarget);
+    }
+    state.ready = true;
+  }
+  if (!allReady) return false;
+  for (const state of Object.values(playerStates)) {
+    state.recovering = false;
+    state.recoveryTargetTime = null;
+  }
   playbackReady = true;
-  playbackRecovering = false;
-  setStartupMessage(`双路固定 ${PLAYBACK_TARGET_DELAY_SECONDS} 秒延迟准备完成`);
+  setStartupMessage("双路独立固定延迟缓冲准备完成");
   els.stage.classList.add("active");
   els.emptyState.classList.add("hide");
   els.playBtn.disabled = false;
   if (!playbackStarted) playBoth(true);
+  updateNetworkTelemetry();
   return true;
 }
 
-function syncPlayers() {
+function maintainPlayerDelay(key) {
+  const entry = playerEntries.find((item) => item.key === key);
+  if (!entry) return;
+  const state = playerStates[key];
+  const video = entry.video;
+  if (video.paused || state.recovering) return;
+  const timeline = playerTimeline(video);
+  if (!timeline || video.currentTime < timeline.start || video.currentTime > timeline.end) {
+    enterPlayerRecovery(key, `${entry.label}播放窗口已变化，正在独立恢复`, true);
+    return;
+  }
+  const actualBuffer = bufferedAheadAt(video, video.currentTime);
+  if (actualBuffer < PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS) {
+    enterPlayerRecovery(key, `${entry.label}实际缓冲低于 ${PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS} 秒`, true);
+    return;
+  }
+  const target = fixedDelayTarget(entry);
+  if (!Number.isFinite(target)) return;
+  const delta = target - video.currentTime;
+  if (delta > PLAYBACK_DELAY_TOLERANCE_SECONDS) {
+    video.playbackRate = FAST_PLAYBACK_RATE;
+  } else if (delta < -PLAYBACK_DELAY_TOLERANCE_SECONDS) {
+    video.playbackRate = SLOW_PLAYBACK_RATE;
+  } else {
+    video.playbackRate = 1;
+  }
+}
+
+function controlPlayers() {
   if (dragging) return;
   if (!playbackReady && !maybeStartBufferedPlayback()) return;
-  const videos = [els.sourceVideo, els.h265Video];
-  if (playbackRecovering) {
-    resumePlaybackWhenReady();
+  if (playbackStartedAt !== null && performance.now() - playbackStartedAt < PLAYBACK_START_GRACE_MS) {
+    for (const { video } of playerEntries) video.playbackRate = 1;
     return;
   }
-  if (playbackStartedAt !== null && performance.now() - playbackStartedAt < SYNC_GRACE_MS) {
-    setBothPlaybackRate(1);
-    return;
+  for (const { key } of playerEntries) {
+    if (playerStates[key].recovering) resumePlayerWhenReady(key);
+    else maintainPlayerDelay(key);
   }
-  if (videos.some((video) => video.paused)) return;
-  const timeline = commonPlaybackTimeline();
-  if (!timeline) return;
-  const outOfWindow = videos.some(
-    (video) => video.currentTime < timeline.start || video.currentTime > timeline.end,
-  );
-  if (outOfWindow) {
-    enterPlaybackRecovery("远程播放窗口已变化，正在重新建立共同缓冲");
-    return;
-  }
-  const minAhead = Math.min(...videos.map((video) => timeline.end - video.currentTime));
-  if (minAhead < PLAYBACK_RECOVERY_BUFFER_SECONDS) {
-    enterPlaybackRecovery("网络缓冲不足，双路暂停等待共同分片");
-    return;
-  }
-  const delta = videos[0].currentTime - videos[1].currentTime;
-  if (!Number.isFinite(delta)) return;
-
-  if (Math.abs(delta) > HARD_SYNC_THRESHOLD_SECONDS) {
-    let target = Math.max(timeline.start, Math.min(...videos.map((video) => video.currentTime)));
-    if (timeline.end - target < PLAYBACK_RECOVERY_BUFFER_SECONDS) {
-      target = fixedDelayTarget(timeline);
-    }
-    if (Number.isFinite(target)) seekBoth(target);
-    return;
-  }
-
-  const averageTime = (videos[0].currentTime + videos[1].currentTime) / 2;
-  const averageDelay = timeline.end - averageTime;
-  let baseRate = 1;
-  if (averageDelay > PLAYBACK_TARGET_DELAY_SECONDS + PLAYBACK_DELAY_TOLERANCE_SECONDS) {
-    baseRate = FAST_PLAYBACK_RATE;
-  } else if (averageDelay < PLAYBACK_TARGET_DELAY_SECONDS - PLAYBACK_DELAY_TOLERANCE_SECONDS) {
-    baseRate = SLOW_PLAYBACK_RATE;
-  }
-
-  if (Math.abs(delta) <= SOFT_SYNC_THRESHOLD_SECONDS) {
-    setBothPlaybackRate(baseRate);
-  } else if (delta > 0) {
-    videos[0].playbackRate = Math.min(baseRate, 1);
-    videos[1].playbackRate = Math.max(baseRate, FAST_PLAYBACK_RATE);
-  } else {
-    videos[0].playbackRate = Math.max(baseRate, FAST_PLAYBACK_RATE);
-    videos[1].playbackRate = Math.min(baseRate, 1);
-  }
+  updateNetworkTelemetry();
 }
 
 function updateSaving(payload) {
@@ -518,22 +617,26 @@ function attachHls(video, url, key) {
   if (players[key]) players[key].destroy();
   players[key] = null;
   if (window.Hls && window.Hls.isSupported()) {
+    const entry = playerEntries.find((item) => item.key === key);
     const player = new window.Hls({
       lowLatencyMode: false,
-      liveSyncDuration: PLAYBACK_TARGET_DELAY_SECONDS,
-      liveMaxLatencyDuration: HLS_RETENTION_SECONDS - PLAYBACK_RECOVERY_BUFFER_SECONDS,
+      liveSyncDuration: entry.targetDelay,
+      liveMaxLatencyDuration: HLS_RETENTION_SECONDS - PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS,
       maxLiveSyncPlaybackRate: 1,
       maxBufferLength: HLS_RETENTION_SECONDS,
       maxMaxBufferLength: HLS_RETENTION_SECONDS,
       backBufferLength: HLS_RETENTION_SECONDS,
     });
+    player.on(window.Hls.Events.FRAG_LOADED, (_event, data) => {
+      recordFragmentDownload(key, data);
+    });
     player.on(window.Hls.Events.ERROR, (_event, data) => {
       if (!data || !data.fatal) return;
       if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
-        enterPlaybackRecovery("远程 HLS 分片暂时中断，双路暂停等待恢复");
+        enterPlayerRecovery(key, `${entry.label}远程分片中断，正在独立恢复`, true);
         player.startLoad();
       } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
-        enterPlaybackRecovery("播放器正在恢复媒体缓冲，双路保持同步暂停");
+        enterPlayerRecovery(key, `${entry.label}媒体缓冲异常，正在独立恢复`, true);
         player.recoverMediaError();
       } else {
         player.destroy();
@@ -560,10 +663,15 @@ function detachPlayers() {
   playbackReady = false;
   playbackStarted = false;
   playbackStartedAt = null;
-  playbackRecovering = false;
-  recoveryTargetTime = null;
-  recoveryRelocated = false;
   userPaused = false;
+  for (const state of Object.values(playerStates)) {
+    state.ready = false;
+    state.recovering = false;
+    state.recoveryTargetTime = null;
+    state.stallCount = 0;
+    state.downloadSamples = [];
+    state.transportBitrateMbps = null;
+  }
   for (const video of [els.sourceVideo, els.h265Video]) {
     video.pause();
     video.removeAttribute("src");
@@ -575,6 +683,7 @@ function detachPlayers() {
   els.playBtn.disabled = true;
   setStartupMessage("等待 H.264 RTSP");
   resetBacklogTrend();
+  updateNetworkTelemetry();
 }
 
 function playBoth(auto = false) {
@@ -582,8 +691,10 @@ function playBoth(auto = false) {
   if (!auto) userPaused = false;
   if (!playbackStarted) playbackStartedAt = performance.now();
   playbackStarted = true;
-  els.sourceVideo.play().catch(() => {});
-  els.h265Video.play().catch(() => {});
+  for (const { key, video } of playerEntries) {
+    if (playerStates[key].recovering) resumePlayerWhenReady(key);
+    else video.play().catch(() => {});
+  }
   els.controls.classList.add("playing");
   updatePlaybackLabel();
 }
@@ -615,6 +726,8 @@ function updateStatus(payload) {
   els.h265Bitrate.textContent = formatBitrate(h265Metrics.elementary_bitrate_mbps);
   els.sourceBytes.textContent = formatBytes(sourceMetrics.elementary_bytes_in_window);
   els.h265Backlog.textContent = formatLatency(h265Metrics.encoder_backlog_seconds);
+  playerStates.source.transportBitrateMbps = metricNumber(sourceMetrics.hls_transport_bitrate_mbps);
+  playerStates.h265_optimized.transportBitrateMbps = metricNumber(h265Metrics.hls_transport_bitrate_mbps);
   updateEncodeHealth(h265Metrics.encoder_backlog_seconds, h265Metrics.encode_speed_x);
   const depth = metricNumber(buffer.depth_frames);
   const capacity = metricNumber(buffer.capacity_frames);
@@ -625,6 +738,7 @@ function updateStatus(payload) {
   setLiveChip(payload.status);
   updateLatencyLabels();
   updateSaving(payload);
+  updateNetworkTelemetry();
 
   if (payload.source_playlist_url && payload.source_playlist_url !== sourcePlaylistUrl) {
     attachHls(els.sourceVideo, payload.source_playlist_url, "source");
@@ -638,7 +752,7 @@ function updateStatus(payload) {
     els.emptyState.classList.remove("hide");
     els.stage.classList.remove("active");
     if (sourcePlaylistUrl && h265PlaylistUrl) {
-      setStartupMessage("正在建立双路缓冲");
+      setStartupMessage(`正在建立独立缓冲：源码 10 s / H.265 预览 15 s`);
     } else if (sourcePlaylistUrl) {
       setStartupMessage("等待 H.265 预览");
     } else if (h265PlaylistUrl) {
@@ -685,7 +799,7 @@ function startPolling() {
     }
   }, 1200);
   latencyTimer = window.setInterval(() => {
-    syncPlayers();
+    controlPlayers();
     updateLatencyLabels();
   }, 500);
   heartbeatTimer = window.setInterval(async () => {
@@ -716,16 +830,23 @@ async function checkRuntime() {
     const variants = runtime.live_preview?.variants || [];
     const playback = runtime.live_preview?.playback || {};
     if (
-      runtime.app_version !== "2.2.0" ||
-      runtime.pipeline_version !== "v2.2.0" ||
+      runtime.app_version !== "2.2.1" ||
+      runtime.pipeline_version !== "v2.2.1" ||
       variants.join(",") !== "source,h265_optimized" ||
-      playback.target_delay_seconds !== PLAYBACK_TARGET_DELAY_SECONDS ||
-      playback.recovery_buffer_seconds !== PLAYBACK_RECOVERY_BUFFER_SECONDS ||
+      playback.policy !== "independent_fixed_delay" ||
+      playback.source_target_delay_seconds !== 10 ||
+      playback.h265_preview_target_delay_seconds !== 15 ||
+      playback.recovery_low_watermark_seconds !== PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS ||
+      playback.recovery_high_watermark_seconds !== PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS ||
       playback.hls_retention_seconds !== HLS_RETENTION_SECONDS
     ) {
-      throw new Error("当前后端不是 V2.2.0 固定延迟实时入口");
+      throw new Error("当前后端不是 V2.2.1 Remote Stable 实时入口");
     }
-    renderConfig(runtime.live_preview?.h265_config);
+    renderConfig(
+      runtime.live_preview?.h265_config,
+      runtime.live_preview?.h265_browser_preview_config,
+      playback,
+    );
     els.runtimeError.hidden = true;
     els.runtimeError.textContent = "";
     return true;
@@ -773,6 +894,7 @@ async function stopStream() {
   detachPlayers();
   setBusy(true);
   try {
+    await new Promise((resolve) => window.setTimeout(resolve, PLAYER_DETACH_SETTLE_MS));
     updateStatus(await fetchJson(`/api/streams/${id}`, { method: "DELETE" }));
   } catch (error) {
     if (error.status === 404) {
@@ -794,8 +916,7 @@ function beginSplitDrag(event) {
   if (dragging) return;
   dragging = true;
   wasPlayingBeforeDrag = playbackReady &&
-    !els.sourceVideo.paused &&
-    !els.h265Video.paused;
+    playerEntries.some(({ video }) => !video.paused);
   if (wasPlayingBeforeDrag) {
     els.sourceVideo.pause();
     els.h265Video.pause();
@@ -842,22 +963,23 @@ els.streamForm.addEventListener("submit", (event) => {
 els.stopBtn.addEventListener("click", stopStream);
 els.playBtn.addEventListener("click", () => {
   if (els.sourceVideo.paused && els.h265Video.paused) {
-    if (playbackRecovering) resumePlaybackWhenReady();
-    else playBoth(false);
+    playBoth(false);
   } else {
     pauseBoth(true);
   }
 });
-els.sourceVideo.addEventListener("pause", () => {
-  if (!playbackRecovering && !els.h265Video.paused) pauseBoth(false);
-});
-els.sourceVideo.addEventListener("play", () => els.controls.classList.add("playing"));
-for (const video of [els.sourceVideo, els.h265Video]) {
+for (const { key, video, label } of playerEntries) {
+  video.addEventListener("pause", () => {
+    if (playerEntries.every((entry) => entry.video.paused)) {
+      els.controls.classList.remove("playing");
+    }
+  });
+  video.addEventListener("play", () => els.controls.classList.add("playing"));
   video.addEventListener("waiting", () => {
-    enterPlaybackRecovery("远程分片暂时未连续，双路暂停等待缓冲");
+    enterPlayerRecovery(key, `${label}远程分片暂时未连续，正在独立恢复`, true);
   });
   video.addEventListener("stalled", () => {
-    enterPlaybackRecovery("远程分片下载延迟，双路暂停等待缓冲");
+    enterPlayerRecovery(key, `${label}远程分片下载延迟，正在独立恢复`, true);
   });
 }
 window.addEventListener("pagehide", () => {

@@ -14,17 +14,17 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
-from ..config import HEVC_CONFIG
+from ..config import BROWSER_PREVIEW_CONFIG, HEVC_CONFIG
 from ..tools import Toolchain, discover_toolchain
 
 
-STREAM_PIPELINE_VERSION = "v2.2.0"
+STREAM_PIPELINE_VERSION = "v2.2.1"
 LIVE_STREAM_STATUSES = ("starting", "running", "failed", "stopped")
 LIVE_VARIANTS = ("source", "h265_optimized")
 HLS_PLAYLIST = "live.m3u8"
 HLS_SEGMENT_PATTERN = "segment_%05d.ts"
 HLS_ALLOWED_SUFFIXES = {".m3u8", ".ts"}
-HLS_SEGMENT_SECONDS = 1
+HLS_SEGMENT_SECONDS = BROWSER_PREVIEW_CONFIG.hls_segment_seconds
 HLS_PLAYLIST_SEGMENTS = 60
 BITRATE_WINDOW_SECONDS = 30.0
 LIVE_BUFFER_SECONDS = 5.0
@@ -34,10 +34,14 @@ HEARTBEAT_TIMEOUT_SECONDS = 45.0
 SOURCE_PLAYLIST_WARNING_SECONDS = 8.0
 PROCESS_TERMINATE_TIMEOUT_SECONDS = 5.0
 THREAD_JOIN_TIMEOUT_SECONDS = 3.0
-PREVIEW_CRF = 21
-PREVIEW_PRESET = "ultrafast"
-PLAYBACK_TARGET_DELAY_SECONDS = 10.0
-PLAYBACK_RECOVERY_BUFFER_SECONDS = 3.0
+PLAYBACK_POLICY = "independent_fixed_delay"
+SOURCE_TARGET_DELAY_SECONDS = 10.0
+H265_PREVIEW_TARGET_DELAY_SECONDS = 15.0
+PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS = 1.5
+PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS = 8.0
+HLS_TRANSPORT_MEASUREMENT_BASIS = (
+    "closed_ts_segment_bytes_latest_30s_media_duration"
+)
 
 ToolchainFactory = Callable[[], Toolchain]
 ProcessFactory = Callable[..., subprocess.Popen]
@@ -140,6 +144,69 @@ def _fps_from_fraction(value: str) -> Optional[float]:
         return None if den == 0 else float(numerator) / den
     except ValueError:
         return None
+
+
+def _hls_transport_snapshot(
+    playlist_path: Path,
+    window_seconds: float = BITRATE_WINDOW_SECONDS,
+) -> Dict[str, Any]:
+    result = {
+        "bitrate_mbps": None,
+        "bytes": 0,
+        "duration_seconds": 0.0,
+    }
+    try:
+        lines = playlist_path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError, UnicodeError):
+        return result
+
+    closed_segments: List[Tuple[float, Path]] = []
+    pending_duration: Optional[float] = None
+    preview_root = playlist_path.parent.resolve()
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.startswith("#EXTINF:"):
+            try:
+                pending_duration = float(line.split(":", 1)[1].split(",", 1)[0])
+            except (IndexError, ValueError):
+                pending_duration = None
+            continue
+        if not line or line.startswith("#") or pending_duration is None:
+            continue
+        leaf = PurePosixPath(line)
+        if (
+            len(leaf.parts) != 1
+            or leaf.name != line
+            or Path(line).suffix.lower() != ".ts"
+        ):
+            pending_duration = None
+            continue
+        segment_path = (playlist_path.parent / line).resolve()
+        if _is_inside(segment_path, preview_root):
+            closed_segments.append((pending_duration, segment_path))
+        pending_duration = None
+
+    total_bytes = 0
+    total_duration = 0.0
+    for duration, segment_path in reversed(closed_segments):
+        if total_duration >= window_seconds:
+            break
+        if duration <= 0:
+            continue
+        try:
+            segment_bytes = segment_path.stat().st_size
+        except OSError:
+            continue
+        total_bytes += segment_bytes
+        total_duration += duration
+
+    if total_duration <= 0:
+        return result
+    return {
+        "bitrate_mbps": total_bytes * 8 / total_duration / 1_000_000,
+        "bytes": total_bytes,
+        "duration_seconds": total_duration,
+    }
 
 
 def _frame_queue_capacity(width: int, height: int, fps: float) -> int:
@@ -257,10 +324,14 @@ class LiveStream:
 
     def output_metrics(self, output: StreamOutput) -> Dict[str, Any]:
         native = output.bitrate.snapshot()
+        transport = _hls_transport_snapshot(output.playlist_path)
         result = {
             "elementary_bitrate_mbps": native["bitrate_mbps"],
             "elementary_window_seconds": native["window_seconds"],
             "elementary_bytes_in_window": native["bytes"],
+            "hls_transport_bitrate_mbps": transport["bitrate_mbps"],
+            "hls_transport_bytes": transport["bytes"],
+            "hls_transport_duration_seconds": transport["duration_seconds"],
         }
         if output.variant == "h265_optimized":
             fps = self.source_probe.get("fps")
@@ -327,6 +398,7 @@ class LiveStream:
                 "source_h264_elementary_stream_bytes_vs_"
                 "h265_elementary_stream_bytes_rolling_30s"
             ),
+            "hls_transport_measurement_basis": HLS_TRANSPORT_MEASUREMENT_BASIS,
             "source_elementary_bitrate_mbps": source_metrics[
                 "elementary_bitrate_mbps"
             ],
@@ -352,9 +424,15 @@ class LiveStream:
                 "capacity_seconds": capacity_seconds,
             },
             "playback": {
-                "policy": "fixed_delay_continuity_first",
-                "target_delay_seconds": PLAYBACK_TARGET_DELAY_SECONDS,
-                "recovery_buffer_seconds": PLAYBACK_RECOVERY_BUFFER_SECONDS,
+                "policy": PLAYBACK_POLICY,
+                "source_target_delay_seconds": SOURCE_TARGET_DELAY_SECONDS,
+                "h265_preview_target_delay_seconds": H265_PREVIEW_TARGET_DELAY_SECONDS,
+                "recovery_low_watermark_seconds": (
+                    PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS
+                ),
+                "recovery_high_watermark_seconds": (
+                    PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS
+                ),
                 "hls_segment_seconds": HLS_SEGMENT_SECONDS,
                 "hls_playlist_segments": HLS_PLAYLIST_SEGMENTS,
                 "hls_retention_seconds": HLS_SEGMENT_SECONDS * HLS_PLAYLIST_SEGMENTS,
@@ -885,9 +963,6 @@ class LiveStreamManager:
         try:
             stream.stop_event.set()
             processes = [process for process in self._processes(stream) if process is not None]
-            for process in processes:
-                self._close_pipe(getattr(process, "stdin", None))
-
             running = []
             for process in processes:
                 if process.poll() is None:
@@ -935,6 +1010,7 @@ class LiveStreamManager:
                 except queue.Empty:
                     break
             for process in processes:
+                self._close_pipe(getattr(process, "stdin", None))
                 self._close_pipe(getattr(process, "stdout", None))
                 self._close_pipe(getattr(process, "stderr", None))
         finally:
@@ -1174,7 +1250,7 @@ class LiveStreamManager:
     def _h265_preview_command(self, toolchain: Toolchain, stream: LiveStream) -> List[Any]:
         output = stream.outputs["h265_optimized"]
         fps = float(stream.source_probe["fps"])
-        gop = max(1, round(fps))
+        gop = max(1, round(fps * BROWSER_PREVIEW_CONFIG.gop_seconds))
         return [
             toolchain.ffmpeg,
             "-hide_banner",
@@ -1188,11 +1264,15 @@ class LiveStreamManager:
             "pipe:0",
             "-an",
             "-c:v",
-            "libx264",
+            BROWSER_PREVIEW_CONFIG.codec,
             "-preset",
-            PREVIEW_PRESET,
+            BROWSER_PREVIEW_CONFIG.preset,
             "-crf",
-            str(PREVIEW_CRF),
+            str(BROWSER_PREVIEW_CONFIG.crf),
+            "-maxrate",
+            BROWSER_PREVIEW_CONFIG.ffmpeg_maxrate(),
+            "-bufsize",
+            BROWSER_PREVIEW_CONFIG.ffmpeg_bufsize(),
             "-tune",
             "zerolatency",
             "-pix_fmt",

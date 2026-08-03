@@ -1,4 +1,5 @@
 import unittest
+import tempfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -13,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 class StubStreamManager:
     def __init__(self):
         self.created_url = None
+        self.hls_file = None
 
     def create_stream(self, rtsp_url):
         self.created_url = rtsp_url
@@ -32,6 +34,8 @@ class StubStreamManager:
         return {"stream_id": stream_id, "status": "stopped", "error": reason}
 
     def get_hls_file(self, stream_id, filename):
+        if stream_id == "stream-1" and self.hls_file is not None:
+            return self.hls_file
         raise StreamNotFound(filename)
 
 
@@ -40,21 +44,38 @@ class WebApiTests(unittest.TestCase):
         self.manager = StubStreamManager()
         self.app = create_app(stream_manager=self.manager)
 
-    def test_runtime_is_v2_2_realtime_only(self):
+    def test_runtime_is_v2_2_1_remote_stable(self):
         with TestClient(self.app) as client:
             runtime = client.get("/api/runtime").json()
-        self.assertEqual(runtime["app_version"], "2.2.0")
-        self.assertEqual(runtime["pipeline_version"], "v2.2.0")
+        self.assertEqual(runtime["app_version"], "2.2.1")
+        self.assertEqual(runtime["pipeline_version"], "v2.2.1")
         self.assertEqual(runtime["commands"], ["check-env", "web"])
         self.assertEqual(runtime["live_preview"]["variants"], ["source", "h265_optimized"])
         self.assertEqual(runtime["live_preview"]["h265_config"]["crf"], 36.0)
         self.assertEqual(
+            runtime["live_preview"]["h265_browser_preview_config"],
+            {
+                "codec": "libx264",
+                "preset": "ultrafast",
+                "crf": 26,
+                "maxrate_mbps": 3.0,
+                "bufsize_mbits": 6.0,
+                "resolution": "source",
+                "gop_seconds": 1.0,
+                "hls_segment_seconds": 1.0,
+                "preview_only": True,
+                "included_in_bitrate_comparison": False,
+            },
+        )
+        self.assertEqual(
             runtime["live_preview"]["playback"],
             {
-                "policy": "fixed_delay_continuity_first",
-                "target_delay_seconds": 10.0,
-                "recovery_buffer_seconds": 3.0,
-                "hls_segment_seconds": 1,
+                "policy": "independent_fixed_delay",
+                "source_target_delay_seconds": 10.0,
+                "h265_preview_target_delay_seconds": 15.0,
+                "recovery_low_watermark_seconds": 1.5,
+                "recovery_high_watermark_seconds": 8.0,
+                "hls_segment_seconds": 1.0,
                 "hls_playlist_segments": 60,
                 "hls_retention_seconds": 60,
                 "heartbeat_timeout_seconds": 45.0,
@@ -83,23 +104,40 @@ class WebApiTests(unittest.TestCase):
             any(getattr(route, "path", "").startswith(legacy_prefix) for route in self.app.routes)
         )
 
-    def test_frontend_uses_fixed_delay_recovery_and_backlog_health(self):
+    def test_frontend_uses_independent_fixed_delay_and_real_buffer(self):
         script = (PROJECT_ROOT / "apps" / "web" / "app.js").read_text(encoding="utf-8")
         page = (PROJECT_ROOT / "apps" / "web" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("const PLAYBACK_TARGET_DELAY_SECONDS = 10;", script)
-        self.assertIn("const PLAYBACK_RECOVERY_BUFFER_SECONDS = 3;", script)
+        self.assertIn("targetDelay: 10", script)
+        self.assertIn("targetDelay: 15", script)
+        self.assertIn("const PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS = 1.5;", script)
+        self.assertIn("const PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS = 8;", script)
         self.assertIn("const HLS_RETENTION_SECONDS = 60;", script)
-        self.assertIn("const SOFT_SYNC_THRESHOLD_SECONDS = 0.15;", script)
-        self.assertIn("const SYNC_GRACE_MS = 2000;", script)
+        self.assertIn("const PLAYBACK_START_GRACE_MS = 2000;", script)
+        self.assertIn("const PLAYER_DETACH_SETTLE_MS = 250;", script)
         self.assertIn("const BACKLOG_TREND_WINDOW_MS = 30000;", script)
-        self.assertIn("function enterPlaybackRecovery(message)", script)
+        self.assertIn("function enterPlayerRecovery(key, message, countStall = false)", script)
+        self.assertIn("function resumePlayerWhenReady(key)", script)
+        self.assertIn("function actualBufferedAhead(video)", script)
+        self.assertIn("data?.stats || data?.frag?.stats", script)
+        self.assertIn("state.recoveryTargetTime = fixedDelayTarget(entry);", script)
+        self.assertIn("bufferedAheadAt(entry.video, recoveryTarget)", script)
+        self.assertIn("bufferedAheadAt(entry.video, currentTarget)", script)
         self.assertIn('video.addEventListener("waiting"', script)
-        self.assertIn("liveSyncDuration: PLAYBACK_TARGET_DELAY_SECONDS", script)
+        self.assertIn("liveSyncDuration: entry.targetDelay", script)
+        self.assertIn("window.setTimeout(resolve, PLAYER_DETACH_SETTLE_MS)", script)
+        self.assertIn("playerEntries.some(({ video }) => !video.paused)", script)
+        self.assertNotIn("function commonPlaybackTimeline()", script)
+        self.assertNotIn("function seekBoth(", script)
+        self.assertNotIn("function enterPlaybackRecovery(", script)
+        self.assertNotIn("pauseBoth(false)", script)
+        self.assertNotIn("state.recoveryTargetTime = target;\n  if (bufferedAheadAt", script)
         self.assertNotIn("liveSyncDurationCount", script)
         self.assertNotIn("if (sourcePlaylistUrl || h265PlaylistUrl)", script)
         self.assertIn('id="startupMessage"', page)
         self.assertIn('id="encodeState"', page)
         self.assertIn('id="backlogTrend"', page)
+        self.assertIn('id="sourceDownloadSpeed"', page)
+        self.assertIn('id="h265BandwidthMargin"', page)
 
     def test_live_playlist_is_not_cacheable_or_proxy_buffered(self):
         playlist_headers = _hls_response_headers(".m3u8")
@@ -108,6 +146,34 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(playlist_headers["X-Accel-Buffering"], "no")
         self.assertEqual(segment_headers["Cache-Control"], "private, max-age=120")
         self.assertEqual(segment_headers["X-Accel-Buffering"], "no")
+
+    def test_hls_response_uses_an_immutable_byte_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            playlist = Path(temp) / "live.m3u8"
+            payload = b"#EXTM3U\n#EXTINF:1.0,\nsegment_00001.ts\n"
+            playlist.write_bytes(payload)
+            self.manager.hls_file = playlist
+            with TestClient(self.app) as client:
+                playlist_response = client.get(
+                    "/api/streams/stream-1/hls/source/live.m3u8",
+                )
+                segment = Path(temp) / "segment_00001.ts"
+                segment_payload = b"transport-stream-snapshot"
+                segment.write_bytes(segment_payload)
+                self.manager.hls_file = segment
+                segment_response = client.get(
+                    "/api/streams/stream-1/hls/source/segment_00001.ts",
+                )
+        self.assertEqual(playlist_response.status_code, 200)
+        self.assertEqual(playlist_response.content, payload)
+        self.assertEqual(int(playlist_response.headers["content-length"]), len(payload))
+        self.assertIn("no-store", playlist_response.headers["cache-control"])
+        self.assertEqual(segment_response.status_code, 200)
+        self.assertEqual(segment_response.content, segment_payload)
+        self.assertEqual(
+            int(segment_response.headers["content-length"]),
+            len(segment_payload),
+        )
 
 
 if __name__ == "__main__":

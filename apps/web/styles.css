@@ -124,6 +124,7 @@ h2 {
 .live-chip.starting { background: #fff1d6; color: var(--warning); }
 
 .connection-panel,
+.network-panel,
 .parameter-panel,
 .telemetry-panel {
   border: 1px solid var(--line);
@@ -319,6 +320,63 @@ h2 {
   padding: 10px 12px;
 }
 
+.network-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.network-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+}
+
+.network-card {
+  min-width: 0;
+  padding: 14px;
+  background: var(--panel);
+}
+
+.network-card h3 {
+  margin-bottom: 11px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.network-card.optimized h3 { color: var(--accent-strong); }
+
+.network-card dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.network-card dl div { min-width: 0; }
+
+.network-card dt {
+  margin-bottom: 4px;
+  color: var(--soft);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.network-card dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.network-card dd.margin-tight { color: var(--warning); }
+.network-card dd.margin-insufficient { color: var(--danger); }
+.network-card dd.margin-healthy { color: var(--ok); }
+
 .ctrl-btn {
   flex: none;
   width: 36px;
@@ -466,6 +524,7 @@ h2 {
   .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .label { width: 225px; font-size: 11px; }
   .app-header { align-items: flex-start; }
+  .network-card dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 640px) {
@@ -497,6 +556,7 @@ h2 {
     padding: 10px 0 0 48px;
   }
   .parameter-grid { grid-template-columns: 1fr; }
+  .network-grid { grid-template-columns: 1fr; }
   .metrics-grid { grid-template-columns: 1fr; }
   .metrics-grid .status-wide { grid-column: span 1; }
   .metrics-grid .status-full { grid-column: span 1; }

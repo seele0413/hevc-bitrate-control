@@ -9,20 +9,25 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from hevc_lab.config import HEVC_CONFIG
+from hevc_lab.config import BROWSER_PREVIEW_CONFIG, HEVC_CONFIG
 from hevc_lab.tools import Toolchain
 from hevc_lab.web.streams import (
     HEARTBEAT_TIMEOUT_SECONDS,
+    HLS_TRANSPORT_MEASUREMENT_BASIS,
     HLS_PLAYLIST_SEGMENTS,
+    H265_PREVIEW_TARGET_DELAY_SECONDS,
     LiveStream,
     LiveStreamManager,
-    PLAYBACK_RECOVERY_BUFFER_SECONDS,
-    PLAYBACK_TARGET_DELAY_SECONDS,
+    PLAYBACK_POLICY,
+    PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS,
+    PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS,
     RollingBitrate,
+    SOURCE_TARGET_DELAY_SECONDS,
     StreamNotFound,
     StreamOutput,
     _mask_rtsp_url,
     _redact_text,
+    _hls_transport_snapshot,
 )
 
 
@@ -48,9 +53,10 @@ def fake_probe(codec="h264", width=320, height=180, fps=10):
 
 
 class RecordingPipe:
-    def __init__(self, max_write=None):
+    def __init__(self, max_write=None, on_close=None):
         self.data = bytearray()
         self.max_write = max_write
+        self.on_close = on_close
         self.closed = False
 
     def write(self, payload):
@@ -62,13 +68,20 @@ class RecordingPipe:
         return length
 
     def close(self):
+        if self.on_close is not None:
+            self.on_close()
         self.closed = True
 
 
 class FakeProcess:
     def __init__(self, command, **kwargs):
         self.command = [str(item) for item in command]
-        self.stdin = RecordingPipe() if kwargs.get("stdin") == subprocess.PIPE else None
+        self.events = []
+        self.stdin = (
+            RecordingPipe(on_close=lambda: self.events.append("close_stdin"))
+            if kwargs.get("stdin") == subprocess.PIPE
+            else None
+        )
         self.stdout = None
         self.stderr = []
         self.returncode = None
@@ -79,6 +92,7 @@ class FakeProcess:
         return self.returncode
 
     def terminate(self):
+        self.events.append("terminate")
         self.terminated = True
         self.returncode = 0
 
@@ -165,7 +179,10 @@ class StreamManagerTests(unittest.TestCase):
             str(HLS_PLAYLIST_SEGMENTS),
         )
         self.assertEqual(sum(command.count("libx264") for command in commands), 1)
-        self.assertEqual(h265_preview[h265_preview.index("-crf") + 1], "21")
+        self.assertEqual(h265_preview[h265_preview.index("-preset") + 1], "ultrafast")
+        self.assertEqual(h265_preview[h265_preview.index("-crf") + 1], "26")
+        self.assertEqual(h265_preview[h265_preview.index("-maxrate") + 1], "3M")
+        self.assertEqual(h265_preview[h265_preview.index("-bufsize") + 1], "6M")
         self.assertEqual(h265_encoder[h265_encoder.index("-preset") + 1], "fast")
         self.assertIn("-nostats", h265_encoder)
         self.assertEqual(h265_encoder[h265_encoder.index("-crf") + 1], "36.0")
@@ -181,17 +198,67 @@ class StreamManagerTests(unittest.TestCase):
             expected_params,
         )
         status = stream.public_status()
-        self.assertEqual(status["playback"]["target_delay_seconds"], PLAYBACK_TARGET_DELAY_SECONDS)
+        self.assertEqual(status["playback"]["policy"], PLAYBACK_POLICY)
         self.assertEqual(
-            status["playback"]["recovery_buffer_seconds"],
-            PLAYBACK_RECOVERY_BUFFER_SECONDS,
+            status["playback"]["source_target_delay_seconds"],
+            SOURCE_TARGET_DELAY_SECONDS,
         )
+        self.assertEqual(
+            status["playback"]["h265_preview_target_delay_seconds"],
+            H265_PREVIEW_TARGET_DELAY_SECONDS,
+        )
+        self.assertEqual(
+            status["playback"]["recovery_low_watermark_seconds"],
+            PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS,
+        )
+        self.assertEqual(
+            status["playback"]["recovery_high_watermark_seconds"],
+            PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS,
+        )
+        self.assertNotIn("target_delay_seconds", status["playback"])
+        self.assertNotIn("recovery_buffer_seconds", status["playback"])
         self.assertEqual(status["playback"]["hls_playlist_segments"], HLS_PLAYLIST_SEGMENTS)
         self.assertEqual(status["playback"]["heartbeat_timeout_seconds"], HEARTBEAT_TIMEOUT_SECONDS)
         self.assertEqual(
             status["outputs"]["h265_optimized"]["probe"]["fixed_config"],
             HEVC_CONFIG.public_dict(10.0),
         )
+        self.assertEqual(
+            status["hls_transport_measurement_basis"],
+            HLS_TRANSPORT_MEASUREMENT_BASIS,
+        )
+        self.assertEqual(BROWSER_PREVIEW_CONFIG.maxrate_mbps, 3.0)
+
+    def test_hls_transport_snapshot_uses_latest_closed_segments(self):
+        preview = self.root / "transport"
+        preview.mkdir()
+        playlist = preview / "live.m3u8"
+        lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:12"]
+        durations = [12.0, 10.0, 9.0, 8.0]
+        sizes = [1_200_000, 1_000_000, None, 800_000]
+        for index, (duration, size) in enumerate(zip(durations, sizes)):
+            name = f"segment_{index:05d}.ts"
+            lines.extend([f"#EXTINF:{duration:.3f},", name])
+            if size is not None:
+                (preview / name).write_bytes(b"x" * size)
+        (preview / "segment_99999.ts").write_bytes(b"x" * 5_000_000)
+        playlist.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        snapshot = _hls_transport_snapshot(playlist, window_seconds=30.0)
+
+        self.assertEqual(snapshot["bytes"], 3_000_000)
+        self.assertEqual(snapshot["duration_seconds"], 30.0)
+        self.assertAlmostEqual(snapshot["bitrate_mbps"], 0.8)
+
+    def test_hls_transport_snapshot_handles_missing_or_empty_playlist(self):
+        missing = _hls_transport_snapshot(self.root / "missing.m3u8")
+        self.assertIsNone(missing["bitrate_mbps"])
+        self.assertEqual(missing["bytes"], 0)
+        playlist = self.root / "empty.m3u8"
+        playlist.write_text("#EXTM3U\n#EXTINF:1.0,\nmissing.ts\n", encoding="utf-8")
+        empty = _hls_transport_snapshot(playlist)
+        self.assertIsNone(empty["bitrate_mbps"])
+        self.assertEqual(empty["duration_seconds"], 0.0)
 
     def test_h265_progress_updates_frame_speed_and_fps(self):
         stream = self.create()
@@ -328,6 +395,12 @@ class StreamManagerTests(unittest.TestCase):
         stopped = self.manager.stop_stream(stream.stream_id)
         self.assertEqual(stopped["status"], "stopped")
         self.assertTrue(all(process.terminated for process in processes))
+        for process in processes:
+            if process.stdin is not None:
+                self.assertLess(
+                    process.events.index("terminate"),
+                    process.events.index("close_stdin"),
+                )
         self.assertTrue(stream.frame_queue.empty())
         self.assertFalse(stream.stream_dir.exists())
 

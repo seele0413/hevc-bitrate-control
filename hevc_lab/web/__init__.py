@@ -1,4 +1,4 @@
-"""V2.2.0 本地实时源码直流工具。"""
+"""V2.2.1 Remote Stable 实时源码直流工具。"""
 
 import sys
 from typing import Optional
