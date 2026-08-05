@@ -247,7 +247,6 @@ h2 {
 .label .name { font-size: 15px; font-weight: 760; }
 .label .hl { font-weight: 760; color: #ffe07b; }
 .label.ours .hl { color: #fff0a8; }
-.preview-flag { color: #dbe9ff; font-size: 11px; }
 
 .divider {
   position: absolute;
@@ -542,7 +541,6 @@ h2 {
   .stage { min-height: 220px; aspect-ratio: 4 / 3; }
   .label { width: 178px; min-height: 122px; padding: 8px; font-size: 10px; }
   .label .name { font-size: 12px; }
-  .preview-flag { font-size: 9px; }
   .badge { top: 70%; width: 62px; height: 62px; }
   .badge .small { font-size: 9px; }
   .badge .big { font-size: 14px; }

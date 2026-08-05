@@ -9,7 +9,7 @@ from .tools import check_capabilities, discover_toolchain
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m hevc_lab",
-        description="H.264 源码直流与 H.265 固定参数实时对比工具",
+        description="H.264 源码直流与 H.265 直接播放实时工具",
     )
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -31,7 +31,7 @@ def main(argv=None) -> int:
             print(f"FFprobe：{info['ffprobe']}")
             print("H.264 解码：可用")
             print("libx265 编码：可用")
-            print("libx264 浏览器预览：可用")
+            print("MPEG-TS 输入/输出：可用")
             print("RTSP 输入与 HLS 输出：可用")
             return 0
         if args.command == "web":

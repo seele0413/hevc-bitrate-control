@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>V2.2.1 Remote Stable 实时源码直流</title>
+    <title>V2.2.2 HEVC 直接播放实时工具</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/styles.css?v=2.2.1" />
+    <link rel="stylesheet" href="/styles.css?v=2.2.2" />
   </head>
   <body>
     <main class="workspace">
       <header class="app-header">
         <div class="brand">
-          <span class="eyebrow">V2.2.1 Remote Stable</span>
-          <h1>H.264 源码直流与 H.265 固定编码</h1>
+          <span class="eyebrow">V2.2.2 HEVC Direct</span>
+          <h1>H.264 源码直流与 H.265 直接播放</h1>
           <p class="subtitle">双路独立固定延迟 · 远程带宽与真实缓冲可观测</p>
         </div>
         <div class="session-panel" aria-label="当前会话状态">
@@ -44,12 +44,12 @@
         </form>
       </section>
 
-      <section class="stage" id="stage" aria-label="实时源码与 H.265 编码对比画面">
+        <section class="stage" id="stage" aria-label="实时源码与 H.265 直接播放对比画面">
         <video class="media base" id="sourceVideo" playsinline muted></video>
         <video class="media ours" id="h265Video" playsinline muted></video>
 
         <div class="label base">
-          <div class="name">原始 H.264 源码流（直通）</div>
+          <div class="name">H.264 源码流（直通）</div>
           <div>分辨率 <span id="sourceResolution">--</span></div>
           <div>源码码率 <span class="hl" id="sourceBitrate">--</span></div>
           <div>30 秒字节 <span id="sourceBytes">--</span></div>
@@ -57,8 +57,7 @@
         </div>
 
         <div class="label ours">
-          <div class="name">H.265 固定参数编码</div>
-          <div class="preview-flag">H.264 仅观看预览 · 不计码率</div>
+          <div class="name">H.265 直接播放</div>
           <div>分辨率 <span id="h265Resolution">--</span></div>
           <div>H.265 码率 <span class="hl" id="h265Bitrate">--</span></div>
           <div>播放延迟 <span id="h265Latency">--</span></div>
@@ -84,7 +83,7 @@
         </button>
         <div class="control-copy">
           <strong>双路独立固定延迟</strong>
-          <span id="timeLabel">源码 10 s / H.265 预览 15 s / 不强制同帧</span>
+          <span id="timeLabel">源码 10 s / H.265 直接播放 15 s / 不强制同帧</span>
         </div>
         <div class="speed-readout">
           <span>H.265 处理状态</span>
@@ -114,7 +113,7 @@
             </dl>
           </article>
           <article class="network-card optimized">
-            <h3>H.265 观看预览 · 目标延迟 15 s</h3>
+            <h3>H.265 直接播放 · 目标延迟 15 s</h3>
             <dl>
               <div><dt>HLS 传输码率</dt><dd id="h265TransportBitrate">--</dd></div>
               <div><dt>实际缓冲</dt><dd id="h265Buffered">--</dd></div>
@@ -206,7 +205,7 @@
       <p class="load-error" id="runtimeError" hidden></p>
     </main>
 
-    <script src="/vendor/hls.min.js?v=1.5.17" defer></script>
-    <script src="/app.js?v=2.2.1" defer></script>
+    <script src="/vendor/hls.min.js?v=1.6.16" defer></script>
+    <script src="/app.js?v=2.2.2" defer></script>
   </body>
 </html>

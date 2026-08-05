@@ -7,7 +7,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
-from ..config import BROWSER_PREVIEW_CONFIG, HEVC_CONFIG
+from ..config import DIRECT_HEVC_HLS_CONFIG, HEVC_CONFIG
 from ..tools import PROJECT_ROOT
 from .streams import (
     HEARTBEAT_TIMEOUT_SECONDS,
@@ -15,7 +15,7 @@ from .streams import (
     HLS_PLAYLIST_SEGMENTS,
     HLS_SEGMENT_SECONDS,
     HLS_TRANSPORT_MEASUREMENT_BASIS,
-    H265_PREVIEW_TARGET_DELAY_SECONDS,
+    H265_TARGET_DELAY_SECONDS,
     LIVE_VARIANTS,
     PLAYBACK_POLICY,
     PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS,
@@ -76,7 +76,7 @@ def create_app(stream_manager: Optional[LiveStreamManager] = None) -> FastAPI:
                 active_stream_manager.close()
 
     app = FastAPI(
-        title="V2.2.1 Remote Stable H.264 源码直流与 H.265 实时编码工具",
+        title="V2.2.2 HEVC 直接播放实时工具",
         version=__version__,
         lifespan=lifespan,
     )
@@ -98,16 +98,22 @@ def create_app(stream_manager: Optional[LiveStreamManager] = None) -> FastAPI:
                 "variants": list(LIVE_VARIANTS),
                 "frontend": "apps/web",
                 "source_mode": "h264_elementary_stream_copy_to_hls",
-                "h265_preview_mode": "view_only_libx264_hls",
+                "h265_delivery_mode": (
+                    "timestamped_mpegts_to_hevc_fmp4_hls_stream_copy"
+                ),
+                "hls_segment_types": {
+                    "source": "mpegts",
+                    "h265_optimized": DIRECT_HEVC_HLS_CONFIG.segment_type,
+                },
+                "h265_keyframe_bound_segments": True,
                 "playlist": HLS_PLAYLIST,
                 "saving_basis": SAVING_BASIS,
                 "h265_config": HEVC_CONFIG.public_dict(),
-                "h265_browser_preview_config": BROWSER_PREVIEW_CONFIG.public_dict(),
                 "hls_transport_measurement_basis": HLS_TRANSPORT_MEASUREMENT_BASIS,
                 "playback": {
                     "policy": PLAYBACK_POLICY,
                     "source_target_delay_seconds": SOURCE_TARGET_DELAY_SECONDS,
-                    "h265_preview_target_delay_seconds": H265_PREVIEW_TARGET_DELAY_SECONDS,
+                    "h265_target_delay_seconds": H265_TARGET_DELAY_SECONDS,
                     "recovery_low_watermark_seconds": (
                         PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS
                     ),
@@ -171,11 +177,13 @@ def create_app(stream_manager: Optional[LiveStreamManager] = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="HLS 文件尚未生成") from exc
         except StreamNotFound as exc:
             raise HTTPException(status_code=404, detail="HLS 文件不存在") from exc
-        media_type = (
-            "application/vnd.apple.mpegurl"
-            if path.suffix.lower() == ".m3u8"
-            else "video/mp2t"
-        )
+        media_types = {
+            ".m3u8": "application/vnd.apple.mpegurl",
+            ".ts": "video/mp2t",
+            ".m4s": "video/mp4",
+            ".mp4": "video/mp4",
+        }
+        media_type = media_types.get(path.suffix.lower(), "application/octet-stream")
         try:
             file_snapshot = path.read_bytes()
         except OSError as exc:

@@ -90,12 +90,14 @@ def check_capabilities(toolchain: Toolchain) -> dict:
 
     if not _has_component(encoders, "libx265"):
         raise ToolError("当前 FFmpeg 不包含 libx265 编码器")
-    if not _has_component(encoders, "libx264"):
-        raise ToolError("当前 FFmpeg 不包含 libx264 编码器，无法生成浏览器预览")
     if not _has_component(decoders, "h264"):
         raise ToolError("当前 FFmpeg 不包含 H.264 解码器")
     if not _has_component(muxers, "hls"):
         raise ToolError("当前 FFmpeg 不包含 HLS muxer")
+    if not _has_component(muxers, "mpegts"):
+        raise ToolError("当前 FFmpeg 不包含 MPEG-TS muxer")
+    if not _has_component(demuxers, "mpegts"):
+        raise ToolError("当前 FFmpeg 不包含 MPEG-TS demuxer")
     if not _has_component(demuxers, "rtsp") and "rtsp" not in protocols:
         raise ToolError("当前 FFmpeg 不支持 RTSP 输入")
 
@@ -103,8 +105,9 @@ def check_capabilities(toolchain: Toolchain) -> dict:
         "ffmpeg": version,
         "ffprobe": probe_version,
         "libx265": True,
-        "libx264_preview": True,
         "h264_decoder": True,
         "rtsp_input": True,
         "hls_muxer": True,
+        "mpegts_muxer": True,
+        "mpegts_demuxer": True,
     }

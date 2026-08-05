@@ -141,7 +141,7 @@ class RealFfmpegPipelineTests(unittest.TestCase):
                     status = manager.get_status(stream_id)
                     source_segments = list(stream.outputs["source"].preview_dir.glob("*.ts"))
                     h265_segments = list(
-                        stream.outputs["h265_optimized"].preview_dir.glob("*.ts")
+                        stream.outputs["h265_optimized"].preview_dir.glob("*.m4s")
                     )
                     if status["status"] == "failed":
                         self.fail(status["error"] or str(status["log_tail"]))
@@ -168,8 +168,15 @@ class RealFfmpegPipelineTests(unittest.TestCase):
                         if line.strip() and not line.startswith("#")
                     ]
                     self.assertTrue(segment_names)
-                    segment = playlist.parent / segment_names[0]
-                    self.assertTrue(segment.is_file())
+                    playlist_text = playlist.read_text(encoding="utf-8")
+                    self.assertTrue(all(
+                        float(line.split(":", 1)[1].split(",", 1)[0]) > 0
+                        for line in playlist_text.splitlines()
+                        if line.startswith("#EXTINF:")
+                    ))
+                    if variant == "h265_optimized":
+                        self.assertIn('#EXT-X-MAP:URI="init.mp4"', playlist_text)
+                        self.assertTrue((playlist.parent / "init.mp4").is_file())
                     completed = subprocess.run(
                         [
                             str(toolchain.ffmpeg),
@@ -177,7 +184,9 @@ class RealFfmpegPipelineTests(unittest.TestCase):
                             "-loglevel",
                             "error",
                             "-i",
-                            str(segment),
+                            str(playlist),
+                            "-t",
+                            "3",
                             "-f",
                             "null",
                             "-",
@@ -241,16 +250,16 @@ class RealFfmpegPipelineTests(unittest.TestCase):
                 else:
                     self.fail(f"1080p/20fps 管线未完成 120 秒运行：{status}")
 
-                preview_metrics = status["outputs"]["h265_optimized"]["metrics"]
-                self.assertIsNotNone(preview_metrics["hls_transport_bitrate_mbps"])
-                self.assertLessEqual(preview_metrics["hls_transport_bitrate_mbps"], 3.3)
-                self.assertGreaterEqual(preview_metrics["hls_transport_duration_seconds"], 29.0)
+                h265_metrics = status["outputs"]["h265_optimized"]["metrics"]
+                self.assertIsNotNone(h265_metrics["hls_transport_bitrate_mbps"])
+                self.assertGreater(h265_metrics["hls_transport_bitrate_mbps"], 0)
+                self.assertGreaterEqual(h265_metrics["hls_transport_duration_seconds"], 29.0)
                 self.assertTrue(queue_depths)
                 self.assertLessEqual(queue_depths[-1], status["frame_buffer"]["capacity_frames"])
                 print(
                     "\nremote-stable metrics: "
                     f"source={status['outputs']['source']['metrics']['hls_transport_bitrate_mbps']:.3f} Mbps, "
-                    f"preview={preview_metrics['hls_transport_bitrate_mbps']:.3f} Mbps, "
+                    f"h265={h265_metrics['hls_transport_bitrate_mbps']:.3f} Mbps, "
                     f"queue={queue_depths[-1]}/{status['frame_buffer']['capacity_frames']}"
                 )
 
@@ -262,28 +271,38 @@ class RealFfmpegPipelineTests(unittest.TestCase):
                         if line.strip() and not line.startswith("#")
                     ]
                     self.assertGreaterEqual(len(segment_names), 2)
-                    for segment_name in (segment_names[0], segment_names[-1]):
-                        completed = subprocess.run(
-                            [
-                                str(toolchain.ffmpeg),
-                                "-hide_banner",
-                                "-loglevel",
-                                "error",
-                                "-i",
-                                str(playlist.parent / segment_name),
-                                "-f",
-                                "null",
-                                "-",
-                            ],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            timeout=30,
-                        )
-                        self.assertEqual(
-                            completed.returncode,
-                            0,
-                            completed.stderr.decode("utf-8", errors="replace"),
-                        )
+                    playlist_text = playlist.read_text(encoding="utf-8")
+                    self.assertTrue(all(
+                        float(line.split(":", 1)[1].split(",", 1)[0]) > 0
+                        for line in playlist_text.splitlines()
+                        if line.startswith("#EXTINF:")
+                    ))
+                    if variant == "h265_optimized":
+                        self.assertIn('#EXT-X-MAP:URI="init.mp4"', playlist_text)
+                        self.assertTrue((playlist.parent / "init.mp4").is_file())
+                    completed = subprocess.run(
+                        [
+                            str(toolchain.ffmpeg),
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-i",
+                            str(playlist),
+                            "-t",
+                            "3",
+                            "-f",
+                            "null",
+                            "-",
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=30,
+                    )
+                    self.assertEqual(
+                        completed.returncode,
+                        0,
+                        completed.stderr.decode("utf-8", errors="replace"),
+                    )
             finally:
                 if "stream_id" in locals():
                     manager.stop_stream(stream_id)

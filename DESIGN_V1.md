@@ -1,86 +1,87 @@
-# V2.2.1 Remote Stable 实时源码直流设计
+# V2.2.2 HEVC 直接播放实时设计
 
-> 当前实现版本：v2.2.1。本文全文是当前唯一有效方案。
+本文只描述 V2.2.2 当前有效方案。
 
-## 1. 输入与输出
+## 1. 输入与五进程管线
 
-系统只接受一个 H.264 RTSP 视频地址。探测到其他视频编码时返回 HTTP 400，不转换、不降级；音频不进入处理链路。
-
-| variant | 正式处理 | 浏览器画面 | 码率证据 |
-|---|---|---|---|
-| `source` | H.264 elementary stream 原样重封装 | H.264 HLS 直通 | 分发前的 H.264 字节 |
-| `h265_optimized` | 固定参数 `libx265` 编码 | 限码 `libx264` 仅观看预览 | 预览转换前的 H.265 字节 |
-
-## 2. 数据流
+系统只接受一个 H.264 RTSP 视频地址，音频不进入处理链路。启动时用 FFprobe 确认视频编码为 H.264，并获得分辨率与帧率。
 
 ```text
-H.264 RTSP
-  -> 单一 FFmpeg 连接，copy 为 H.264 elementary stream
-  -> Python 统计一次源字节
-     -> 原字节写入源码 HLS，-c:v copy
-     -> 原字节写入 H.264 解码进程，输出 yuv420p
-        -> 约 5 秒 / 最大 512 MiB 阻塞队列
-        -> 固定参数 libx265
-        -> Python 统计 H.265 字节
-        -> libx264 限码 HLS，仅供浏览器观看
+RTSP 输入
+  -> H.264 elementary stream
+     -> 源码 HLS 重封装（stream copy，MPEG-TS）
+     -> H.264 解码（yuv420p）
+        -> 约 5 秒、最大 512 MiB 的有界阻塞队列
+           -> 唯一 libx265 固定参数编码
+              -> 带时间戳 MPEG-TS
+                 -> H.265 fMP4 HLS 重封装（stream copy）
 ```
 
-分发和编码写入必须处理管道短写。任一写入、读取或子进程退出都会设置会话停止事件并统一终止五个 FFmpeg 进程。
+FFmpeg 进程固定为 RTSP 输入、源码 HLS、H.264 解码、H.265 编码和 H.265 HLS 重封装五个。任一进程、管道读写或关键线程失败，都会设置停止事件并统一 terminate/wait/kill 全组进程。
 
-## 3. 编码配置
+## 2. 正式 H.265 编码
 
-正式 H.265 参数只定义在 `hevc_lab/config.py`：CRF 36.0、preset fast、Main、`yuv420p`、ref 4、bframes 4、b-adapt 2、lookahead 45、GOP 10 秒、min GOP 2 秒、scenecut 40、cutree、weightp 和固定 AQ2。帧单位 keyint 根据探测帧率计算。
-
-浏览器预览使用独立不可变配置：`libx264 ultrafast`、CRF 26、`maxrate 3M`、`bufsize 6M`、保持源分辨率、1 秒 GOP 和 1 秒 HLS。该配置只降低远程观看带宽，不改变正式 H.265 输出或节省率。
-
-## 4. 码率与传输指标
-
-两路比较码率按 elementary stream 字节计算，窗口固定为最近 30 秒。源码在分发前只计数一次；预览编码字节、音频和 HLS 容器开销不计入。
+唯一配置位于 `hevc_lab/config.py`：
 
 ```text
-bandwidth_saving_pct = (source_bitrate - h265_bitrate) / source_bitrate * 100
+CRF 36.0 · preset fast · Main 8-bit · yuv420p
+ref 4 · bframes 4 · b-adapt 2 · lookahead 45
+GOP 10 秒 · min GOP 2 秒 · scenecut 40
+cutree 1 · weightp 1 · AQ mode 2 · strength 1.0
+qg-size 32 · aq-motion 0
 ```
 
-负值原样返回，网页显示为“码率增加”。
+输出格式为带时间戳 MPEG-TS。正式 GOP 仍允许 2 到 10 秒，HLS 不重新编码修正关键帧，因此右路分片由关键帧边界决定，实际时长可以接近 10 秒。
 
-每个输出还提供 HLS 实际传输指标。后端解析当前 `live.m3u8`，从最新分片向前选取约 30 秒，只统计播放列表已引用、已封口且文件实际存在的单层 `.ts`；孤立、缺失、非法路径和未出现在列表中的文件不计入。返回传输字节、媒体时长和按媒体时长计算的 Mbps，不按 HTTP 请求次数重复累计。
+## 3. H.265 直接播放 HLS
 
-浏览器使用 hls.js 最近 10 个完整分片的字节和下载耗时计算加权速度，并结合后端传输码率显示带宽余量。浏览器会话指标不进入状态 API。
+H.265 编码器输出的同一份 MPEG-TS 字节同时完成两件事：
 
-## 5. 独立固定延迟状态机
+1. 写入右路 HLS 重封装进程。
+2. 送入流式 MPEG-TS/H.265 统计器。
 
-- 源码路目标为自身 HLS live edge 之前 10 秒。
-- H.265 预览路目标为自身 HLS live edge 之前 15 秒。
-- 两路不共享时间轴、不共同 seek、不执行软/硬同帧同步。
-- 正常播放按目标差值使用 `0.98x`、`1.0x` 或 `1.02x`。
-- 每一路以自己的 `video.buffered` 计算当前位置实际缓冲。
-- 实际缓冲低于 1.5 秒或该路窗口失效时，只暂停并恢复该路，另一条路继续播放。
-- 恢复时锁定一个目标积累缓冲，防止每次轮询追逐移动 live edge；当前固定延迟目标拥有至少 8 秒实际缓冲后，该路重新定位并恢复。
-- 手动播放/暂停、停止、页面关闭仍同时控制两路。
-- 拖动分割线时暂停双路以冻结对比画面，结束拖动后恢复此前正在播放的两路。
+重封装命令使用 `-c:v copy`、`-tag:v hvc1`、`-hls_segment_type fmp4`，生成 `init.mp4` 和 `segment_*.m4s`。播放器使用 `hls.js 1.6.16` 的 MSE 路径；能够原生播放 HEVC HLS 的环境也可使用原生路径。
 
-## 6. HLS 与生命周期
+统计器解析 PAT、PMT 和 PES，找到 H.265 视频 PID，只累计 PES 有效载荷字节，排除 TS 包头、适配字段、PES 头、初始化文件和无关 PID。统计器支持任意输入分片、PES 跨包、异常包恢复和停止时已识别尾部。
 
-- 源码 HLS 依赖摄像头关键帧切片，不以重新编码修正长 GOP。
-- 8 秒仍未生成源码播放列表时只给出启动/延迟告警。
-- 两路播放列表保留 60 个分片；右路预览目标分片为 1 秒。
-- 播放列表使用 `no-store/no-cache` 并关闭代理缓冲；唯一命名的 TS 分片只允许浏览器私有短期缓存。
-- HLS 路由先把 `.m3u8` 或 `.ts` 读取为不可变字节快照再响应，传输过程不继续依赖可能被轮转或删除的磁盘文件。
-- 同时只允许一个活动会话；页面心跳、状态查询和 HLS 文件请求共同续租，租约超时为 45 秒。
-- 页面停止、租约超时或任一子进程退出时回收所有进程和管道。
-- 回收时先 terminate/wait/kill 所有子进程，最后关闭管道，避免带缓冲 stdin 在 close/flush 阶段阻塞。
+## 4. 源码 HLS
 
-## 7. 安全与接口
+源码 HLS 使用完全相同的 H.264 elementary stream 字节与 `-c:v copy` 生成 MPEG-TS 分片。它不重新编码来修正摄像头关键帧间隔。源码和右路都保留 60 个分片，播放列表不缓存、不代理缓冲，HLS 文件响应先读取不可变字节快照。
 
-`POST /api/streams` 的 JSON 只允许一个 `rtsp_url` 字段。状态、错误和日志只保留脱敏主机，不得包含用户名、密码、完整路径、query 或 fragment。HLS 文件路由只接受固定 variant 下的 `.m3u8` 与 `.ts` 单层文件名，并验证解析后路径仍位于会话目录。
+## 5. 指标口径
 
-CLI 只提供：
+正式节省率只使用最近 30 秒 elementary stream 滚动窗口：
+
+```text
+bandwidth_saving_pct = (source_h264_bitrate - h265_bitrate)
+                       / source_h264_bitrate * 100
+```
+
+源码在分发前只计数一次；H.265 使用 MPEG-TS PES 载荷统计。HLS 容器开销不进入 `bandwidth_saving_pct`。负值原样返回并在网页显示为码率增加。
+
+HLS 传输诊断另按当前播放列表中最新约 30 秒、已经封口且文件存在的媒体分片统计：源码接受 `.ts`，右路接受 `.m4s`，`init.mp4` 忽略。口径固定为 `closed_hls_segment_bytes_latest_30s_media_duration`。
+
+## 6. 播放与恢复
+
+源码目标延迟为自身 HLS live edge 前 10 秒，H.265 目标延迟为 15 秒。两路不共享时间轴、不强制同帧。正常播放只在 `0.98x` 到 `1.02x` 范围内靠近各自目标。每一路以自己的 `video.buffered` 计算实际缓冲，低于 1.5 秒时只恢复对应路；达到锁定目标的 8 秒缓冲后再继续播放。
+
+手动播放、暂停、停止、页面关闭同时控制两路。分割线拖动只改变裁剪位置，视频继续按各自状态播放，不暂停、不跳转、不重置播放速率。停止时前端先销毁播放器并等待 250 ms，再请求后端回收。
+
+## 7. HEVC 能力门禁与错误处理
+
+页面读取 `/api/runtime` 后，使用 `MediaSource` 或 `ManagedMediaSource` 依次检测泛化 `hvc1` 以及完整 Main 8-bit codec 字符串，并检查原生 HEVC HLS 能力。任一完整 codec 字符串受支持即可通过启动门禁；全部不支持时，在提交 `POST /api/streams` 前明确提示启用系统 HEVC 解码器。
+
+启动后的 H.265 manifest、MSE、媒体或 codec 错误不触发 H.264 回退，而是立即停止当前会话，回收五个 FFmpeg 进程，并提示启用系统 HEVC 解码器。
+
+## 8. 安全与生命周期
+
+接口只接受 `rtsp_url` 字段。状态、日志和错误不得暴露用户名、密码、完整路径、query 或 fragment。HLS 路由只接受固定 variant 下的单层 `.m3u8`、`.ts`、`.m4s`、`.mp4` 文件名，并验证路径仍在会话目录内。
+
+只允许一个活动会话。状态、HLS 请求和页面心跳共同续租，租约为 45 秒；页面停止、租约超时或进程退出时清理所有管道、线程、进程和会话目录。
+
+## 9. CLI
 
 ```text
 python -m hevc_lab check-env
 python -m hevc_lab web --host 127.0.0.1 --port 8000
 ```
-
-## 8. 第一阶段非目标
-
-本阶段不处理声明帧率与实际帧率不一致、不恢复摄像头绝对时间戳、不重构共享背压管线、不增加降噪，也不修改正式 H.265 参数。

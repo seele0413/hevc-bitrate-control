@@ -51,7 +51,7 @@ const els = {
 const players = { source: null, h265_optimized: null };
 const playerEntries = [
   { key: "source", video: els.sourceVideo, label: "源码路", targetDelay: 10 },
-  { key: "h265_optimized", video: els.h265Video, label: "H.265 预览路", targetDelay: 15 },
+  { key: "h265_optimized", video: els.h265Video, label: "H.265 直接播放路", targetDelay: 15 },
 ];
 const playerStates = {
   source: { ready: false, recovering: false, recoveryTargetTime: null, stallCount: 0, downloadSamples: [], transportBitrateMbps: null },
@@ -64,7 +64,26 @@ const PLAYBACK_START_GRACE_MS = 2000;
 const PLAYER_DETACH_SETTLE_MS = 250;
 const SLOW_PLAYBACK_RATE = 0.98;
 const FAST_PLAYBACK_RATE = 1.02;
-const HLS_RETENTION_SECONDS = 60;
+const HLS_SEGMENT_SECONDS = 10;
+const HLS_PLAYLIST_SEGMENTS = 60;
+const HLS_BUFFER_SECONDS = 60;
+const HEVC_MSE_MIME = 'video/mp4; codecs="hvc1"';
+const HEVC_MSE_FALLBACK_MIMES = [
+  'video/mp4; codecs="hvc1.1.6.L30.B0"',
+  'video/mp4; codecs="hvc1.1.6.L63.B0"',
+  'video/mp4; codecs="hvc1.1.6.L93.B0"',
+  'video/mp4; codecs="hvc1.1.6.L120.B0"',
+  'video/mp4; codecs="hvc1.1.6.L123.B0"',
+  'video/mp4; codecs="hvc1.1.6.L150.B0"',
+  'video/mp4; codecs="hvc1.1.6.L153.B0"',
+  'video/mp4; codecs="hvc1.1.6.L180.B0"',
+  'video/mp4; codecs="hvc1.1.6.L183.B0"',
+  'video/mp4; codecs="hvc1.1.6.L186.B0"',
+];
+const HEVC_NATIVE_HLS_MIME = 'application/vnd.apple.mpegurl; codecs="hvc1"';
+const HEVC_NATIVE_HLS_FALLBACK_MIMES = HEVC_MSE_FALLBACK_MIMES.map((mime) =>
+  mime.replace("video/mp4", "application/vnd.apple.mpegurl"),
+);
 const BACKLOG_TREND_WINDOW_MS = 30000;
 const BACKLOG_TREND_MIN_SPAN_MS = 10000;
 const BACKLOG_GROWTH_THRESHOLD_SECONDS_PER_MINUTE = 0.5;
@@ -84,8 +103,8 @@ let stopping = false;
 let splitFrame = null;
 let pendingSplit = 50;
 let currentSplit = 50;
-let wasPlayingBeforeDrag = false;
 let backlogSamples = [];
+let codecFailureHandled = false;
 
 function setSplit(pct) {
   const next = Math.max(0, Math.min(100, pct));
@@ -163,7 +182,7 @@ function updatePlaybackLabel() {
   } else if (userPaused) {
     els.timeLabel.textContent = "双路已手动暂停";
   } else {
-    els.timeLabel.textContent = "源码 10 s / H.265 预览 15 s / 独立播放 · 不强制同帧";
+    els.timeLabel.textContent = "源码 10 s / H.265 直接播放 15 s / 独立播放 · 不强制同帧";
   }
 }
 
@@ -354,7 +373,7 @@ function configValue(value, suffix = "") {
   return `${value}${suffix}`;
 }
 
-function renderConfig(config, preview = {}, playback = {}) {
+function renderConfig(config, playback = {}) {
   if (!config || typeof config !== "object" || !els.configSummary) return;
   const crf = metricNumber(config.crf);
   const profile = String(config.profile || "main").toLowerCase() === "main"
@@ -377,12 +396,12 @@ function renderConfig(config, preview = {}, playback = {}) {
       `${configValue(config.min_gop_seconds)}-${configValue(config.gop_seconds)} 秒 · scenecut ${configValue(config.scenecut)} · cutree/weightp`,
     ],
     [
-      "浏览器预览",
-      `${configValue(preview.codec)} ${configValue(preview.preset)} · CRF ${configValue(preview.crf)} · ${configValue(preview.maxrate_mbps, "M")} 上限`,
+      "HLS 投递",
+      "带时间戳 MPEG-TS → fMP4 · H.265 stream copy",
     ],
     [
       "独立播放",
-      `源码 ${configValue(playback.source_target_delay_seconds, "s")} · 预览 ${configValue(playback.h265_preview_target_delay_seconds, "s")}`,
+      `源码 ${configValue(playback.source_target_delay_seconds, "s")} · H.265 ${configValue(playback.h265_target_delay_seconds, "s")}`,
     ],
     [
       "恢复水位",
@@ -459,7 +478,7 @@ function bufferedAheadAt(video, target) {
 }
 
 function enterPlayerRecovery(key, message, countStall = false) {
-  if (!playbackReady || userPaused || dragging || stopping) return;
+  if (!playbackReady || userPaused || stopping) return;
   const entry = playerEntries.find((item) => item.key === key);
   if (!entry) return;
   const state = playerStates[key];
@@ -583,7 +602,6 @@ function maintainPlayerDelay(key) {
 }
 
 function controlPlayers() {
-  if (dragging) return;
   if (!playbackReady && !maybeStartBufferedPlayback()) return;
   if (playbackStartedAt !== null && performance.now() - playbackStartedAt < PLAYBACK_START_GRACE_MS) {
     for (const { video } of playerEntries) video.playbackRate = 1;
@@ -612,32 +630,86 @@ function updateSaving(payload) {
   }
 }
 
+function mediaSourceSupports(mime) {
+  const constructors = [window.ManagedMediaSource, window.MediaSource];
+  return constructors.some((MediaSourceClass) =>
+    typeof MediaSourceClass?.isTypeSupported === "function" &&
+    MediaSourceClass.isTypeSupported(mime),
+  );
+}
+
+function nativeHlsSupports(video, mime) {
+  return Boolean(video.canPlayType(mime));
+}
+
+function supportedHevcMseMime() {
+  return [HEVC_MSE_MIME, ...HEVC_MSE_FALLBACK_MIMES].find((mime) =>
+    mediaSourceSupports(mime),
+  ) || null;
+}
+
+function supportedHevcNativeMime(video) {
+  return [HEVC_NATIVE_HLS_MIME, ...HEVC_NATIVE_HLS_FALLBACK_MIMES].find((mime) =>
+    nativeHlsSupports(video, mime),
+  ) || null;
+}
+
+function hevcPlaybackCapabilities() {
+  return {
+    mse: Boolean(supportedHevcMseMime()),
+    native: Boolean(supportedHevcNativeMime(els.h265Video)),
+  };
+}
+
+function hlsMseSupported(key) {
+  if (!window.Hls) return false;
+  if (key === "h265_optimized") return Boolean(supportedHevcMseMime());
+  return Boolean(
+    (typeof window.Hls.isMSESupported === "function" && window.Hls.isMSESupported()) ||
+    (typeof window.Hls.isSupported === "function" && window.Hls.isSupported()),
+  );
+}
+
+function handleH265CodecFailure() {
+  if (codecFailureHandled) return;
+  codecFailureHandled = true;
+  const message = "H.265 直接播放失败，请启用系统 HEVC 解码器后重试";
+  els.errorText.textContent = message;
+  setStartupMessage(message);
+  if (streamId) void stopStream(message);
+}
+
 function attachHls(video, url, key) {
   if (!url) return;
   if (players[key]) players[key].destroy();
   players[key] = null;
-  if (window.Hls && window.Hls.isSupported()) {
-    const entry = playerEntries.find((item) => item.key === key);
+  const entry = playerEntries.find((item) => item.key === key);
+  if (window.Hls && hlsMseSupported(key)) {
     const player = new window.Hls({
       lowLatencyMode: false,
       liveSyncDuration: entry.targetDelay,
-      liveMaxLatencyDuration: HLS_RETENTION_SECONDS - PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS,
+      liveMaxLatencyDuration: HLS_BUFFER_SECONDS - PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS,
       maxLiveSyncPlaybackRate: 1,
-      maxBufferLength: HLS_RETENTION_SECONDS,
-      maxMaxBufferLength: HLS_RETENTION_SECONDS,
-      backBufferLength: HLS_RETENTION_SECONDS,
+      maxBufferLength: HLS_BUFFER_SECONDS,
+      maxMaxBufferLength: HLS_BUFFER_SECONDS,
+      backBufferLength: HLS_BUFFER_SECONDS,
     });
     player.on(window.Hls.Events.FRAG_LOADED, (_event, data) => {
       recordFragmentDownload(key, data);
     });
     player.on(window.Hls.Events.ERROR, (_event, data) => {
       if (!data || !data.fatal) return;
+      if (key === "h265_optimized" && (
+        data.type === window.Hls.ErrorTypes.MEDIA_ERROR ||
+        String(data.details || "").toLowerCase().includes("codec") ||
+        String(data.details || "").toLowerCase().includes("incompatible")
+      )) {
+        handleH265CodecFailure();
+        return;
+      }
       if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
         enterPlayerRecovery(key, `${entry.label}远程分片中断，正在独立恢复`, true);
         player.startLoad();
-      } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
-        enterPlayerRecovery(key, `${entry.label}媒体缓冲异常，正在独立恢复`, true);
-        player.recoverMediaError();
       } else {
         player.destroy();
         players[key] = null;
@@ -646,11 +718,18 @@ function attachHls(video, url, key) {
     player.loadSource(url);
     player.attachMedia(video);
     players[key] = player;
-  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    video.src = url;
-  } else {
-    throw new Error("当前浏览器不支持 HLS 播放");
+    return;
   }
+
+  const nativeMime = key === "h265_optimized"
+    ? supportedHevcNativeMime(video)
+    : "application/vnd.apple.mpegurl";
+  if (nativeMime && nativeHlsSupports(video, nativeMime)) {
+    video.src = url;
+    return;
+  }
+  if (key === "h265_optimized") handleH265CodecFailure();
+  throw new Error("当前浏览器不支持所需的 HLS 编码");
 }
 
 function detachPlayers() {
@@ -752,9 +831,9 @@ function updateStatus(payload) {
     els.emptyState.classList.remove("hide");
     els.stage.classList.remove("active");
     if (sourcePlaylistUrl && h265PlaylistUrl) {
-      setStartupMessage(`正在建立独立缓冲：源码 10 s / H.265 预览 15 s`);
+      setStartupMessage(`正在建立独立缓冲：源码 10 s / H.265 直接播放 15 s`);
     } else if (sourcePlaylistUrl) {
-      setStartupMessage("等待 H.265 预览");
+      setStartupMessage("等待 H.265 直接播放");
     } else if (h265PlaylistUrl) {
       setStartupMessage("等待源码关键帧");
     } else {
@@ -827,26 +906,34 @@ function stopPolling() {
 async function checkRuntime() {
   try {
     const runtime = await fetchJson("/api/runtime", { cache: "no-store" });
-    const variants = runtime.live_preview?.variants || [];
-    const playback = runtime.live_preview?.playback || {};
+    const livePreview = runtime.live_preview || {};
+    const variants = livePreview.variants || [];
+    const hlsTypes = livePreview.hls_segment_types || {};
+    const playback = livePreview.playback || {};
     if (
-      runtime.app_version !== "2.2.1" ||
-      runtime.pipeline_version !== "v2.2.1" ||
+      runtime.app_version !== "2.2.2" ||
+      runtime.pipeline_version !== "v2.2.2" ||
       variants.join(",") !== "source,h265_optimized" ||
+      livePreview.h265_delivery_mode !== "timestamped_mpegts_to_hevc_fmp4_hls_stream_copy" ||
+      hlsTypes.source !== "mpegts" ||
+      hlsTypes.h265_optimized !== "fmp4" ||
+      livePreview.h265_keyframe_bound_segments !== true ||
       playback.policy !== "independent_fixed_delay" ||
       playback.source_target_delay_seconds !== 10 ||
-      playback.h265_preview_target_delay_seconds !== 15 ||
+      playback.h265_target_delay_seconds !== 15 ||
+      playback.hls_segment_seconds !== HLS_SEGMENT_SECONDS ||
+      playback.hls_playlist_segments !== HLS_PLAYLIST_SEGMENTS ||
+      playback.hls_retention_seconds !== HLS_SEGMENT_SECONDS * HLS_PLAYLIST_SEGMENTS ||
       playback.recovery_low_watermark_seconds !== PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS ||
-      playback.recovery_high_watermark_seconds !== PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS ||
-      playback.hls_retention_seconds !== HLS_RETENTION_SECONDS
+      playback.recovery_high_watermark_seconds !== PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS
     ) {
-      throw new Error("当前后端不是 V2.2.1 Remote Stable 实时入口");
+      throw new Error("当前后端不是 V2.2.2 HEVC 直接播放实时入口");
     }
-    renderConfig(
-      runtime.live_preview?.h265_config,
-      runtime.live_preview?.h265_browser_preview_config,
-      playback,
-    );
+    const capabilities = hevcPlaybackCapabilities();
+    if (!capabilities.mse && !capabilities.native) {
+      throw new Error("当前浏览器不支持 HEVC MSE 或原生 HEVC HLS，请启用系统 HEVC 解码器后重试");
+    }
+    renderConfig(livePreview.h265_config, playback);
     els.runtimeError.hidden = true;
     els.runtimeError.textContent = "";
     return true;
@@ -860,6 +947,7 @@ async function checkRuntime() {
 async function startStream(rtspUrl) {
   if (!(await checkRuntime())) return;
   detachPlayers();
+  codecFailureHandled = false;
   setStartupMessage("正在连接 H.264 RTSP");
   setBusy(true);
   setLiveChip("starting");
@@ -875,6 +963,10 @@ async function startStream(rtspUrl) {
     updateStatus(payload);
     startPolling();
   } catch (error) {
+    const activeStreamId = streamId;
+    if (activeStreamId) {
+      await stopStream(error.message || "H.265 直接播放启动失败");
+    }
     streamId = null;
     els.errorText.textContent = error.message;
     setLiveChip("failed");
@@ -882,7 +974,7 @@ async function startStream(rtspUrl) {
   }
 }
 
-async function stopStream() {
+async function stopStream(reason = null) {
   if (!streamId || stopping) return;
   const id = streamId;
   stopping = true;
@@ -909,19 +1001,17 @@ async function stopStream() {
     stopping = false;
     setBusy(false);
     els.rtspInput.disabled = false;
+    if (typeof reason === "string" && reason) {
+      els.errorText.textContent = reason;
+      setStartupMessage(reason);
+      setLiveChip("failed");
+    }
   }
 }
 
 function beginSplitDrag(event) {
   if (dragging) return;
   dragging = true;
-  wasPlayingBeforeDrag = playbackReady &&
-    playerEntries.some(({ video }) => !video.paused);
-  if (wasPlayingBeforeDrag) {
-    els.sourceVideo.pause();
-    els.h265Video.pause();
-  }
-  for (const video of [els.sourceVideo, els.h265Video]) video.playbackRate = 1;
   els.stage.classList.add("dragging");
   els.divider.setPointerCapture(event.pointerId);
   setSplit(posFromEvent(event.clientX));
@@ -941,8 +1031,6 @@ function endSplitDrag(event) {
   if (els.divider.hasPointerCapture(event.pointerId)) {
     els.divider.releasePointerCapture(event.pointerId);
   }
-  if (wasPlayingBeforeDrag) playBoth(true);
-  wasPlayingBeforeDrag = false;
 }
 
 els.divider.addEventListener("pointerdown", beginSplitDrag);
@@ -960,7 +1048,7 @@ els.streamForm.addEventListener("submit", (event) => {
   const rtspUrl = els.rtspInput.value.trim();
   if (rtspUrl) startStream(rtspUrl);
 });
-els.stopBtn.addEventListener("click", stopStream);
+els.stopBtn.addEventListener("click", () => stopStream());
 els.playBtn.addEventListener("click", () => {
   if (els.sourceVideo.paused && els.h265Video.paused) {
     playBoth(false);
@@ -980,6 +1068,9 @@ for (const { key, video, label } of playerEntries) {
   });
   video.addEventListener("stalled", () => {
     enterPlayerRecovery(key, `${label}远程分片下载延迟，正在独立恢复`, true);
+  });
+  video.addEventListener("error", () => {
+    if (key === "h265_optimized" && video.error) handleH265CodecFailure();
   });
 }
 window.addEventListener("pagehide", () => {

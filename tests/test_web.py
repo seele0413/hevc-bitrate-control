@@ -44,40 +44,34 @@ class WebApiTests(unittest.TestCase):
         self.manager = StubStreamManager()
         self.app = create_app(stream_manager=self.manager)
 
-    def test_runtime_is_v2_2_1_remote_stable(self):
+    def test_runtime_is_v2_2_2_hevc_direct(self):
         with TestClient(self.app) as client:
             runtime = client.get("/api/runtime").json()
-        self.assertEqual(runtime["app_version"], "2.2.1")
-        self.assertEqual(runtime["pipeline_version"], "v2.2.1")
+        self.assertEqual(runtime["app_version"], "2.2.2")
+        self.assertEqual(runtime["pipeline_version"], "v2.2.2")
         self.assertEqual(runtime["commands"], ["check-env", "web"])
         self.assertEqual(runtime["live_preview"]["variants"], ["source", "h265_optimized"])
         self.assertEqual(runtime["live_preview"]["h265_config"]["crf"], 36.0)
         self.assertEqual(
-            runtime["live_preview"]["h265_browser_preview_config"],
-            {
-                "codec": "libx264",
-                "preset": "ultrafast",
-                "crf": 26,
-                "maxrate_mbps": 3.0,
-                "bufsize_mbits": 6.0,
-                "resolution": "source",
-                "gop_seconds": 1.0,
-                "hls_segment_seconds": 1.0,
-                "preview_only": True,
-                "included_in_bitrate_comparison": False,
-            },
+            runtime["live_preview"]["h265_delivery_mode"],
+            "timestamped_mpegts_to_hevc_fmp4_hls_stream_copy",
         )
+        self.assertEqual(
+            runtime["live_preview"]["hls_segment_types"],
+            {"source": "mpegts", "h265_optimized": "fmp4"},
+        )
+        self.assertTrue(runtime["live_preview"]["h265_keyframe_bound_segments"])
         self.assertEqual(
             runtime["live_preview"]["playback"],
             {
                 "policy": "independent_fixed_delay",
                 "source_target_delay_seconds": 10.0,
-                "h265_preview_target_delay_seconds": 15.0,
+                "h265_target_delay_seconds": 15.0,
                 "recovery_low_watermark_seconds": 1.5,
                 "recovery_high_watermark_seconds": 8.0,
-                "hls_segment_seconds": 1.0,
+                "hls_segment_seconds": 10.0,
                 "hls_playlist_segments": 60,
-                "hls_retention_seconds": 60,
+                "hls_retention_seconds": 600.0,
                 "heartbeat_timeout_seconds": 45.0,
             },
         )
@@ -111,7 +105,10 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("targetDelay: 15", script)
         self.assertIn("const PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS = 1.5;", script)
         self.assertIn("const PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS = 8;", script)
-        self.assertIn("const HLS_RETENTION_SECONDS = 60;", script)
+        self.assertIn("const HLS_BUFFER_SECONDS = 60;", script)
+        self.assertIn('const HEVC_MSE_MIME = \'video/mp4; codecs="hvc1"\';', script)
+        self.assertIn("const HEVC_MSE_FALLBACK_MIMES = [", script)
+        self.assertIn('video/mp4; codecs="hvc1.1.6.L120.B0"', script)
         self.assertIn("const PLAYBACK_START_GRACE_MS = 2000;", script)
         self.assertIn("const PLAYER_DETACH_SETTLE_MS = 250;", script)
         self.assertIn("const BACKLOG_TREND_WINDOW_MS = 30000;", script)
@@ -119,13 +116,31 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("function resumePlayerWhenReady(key)", script)
         self.assertIn("function actualBufferedAhead(video)", script)
         self.assertIn("data?.stats || data?.frag?.stats", script)
+        self.assertIn("function mediaSourceSupports(mime)", script)
+        self.assertIn("function supportedHevcMseMime()", script)
+        self.assertIn("function supportedHevcNativeMime(video)", script)
+        self.assertIn("function hevcPlaybackCapabilities()", script)
+        self.assertIn("function handleH265CodecFailure()", script)
+        self.assertIn('els.stopBtn.addEventListener("click", () => stopStream());', script)
+        self.assertIn('if (typeof reason === "string" && reason)', script)
         self.assertIn("state.recoveryTargetTime = fixedDelayTarget(entry);", script)
         self.assertIn("bufferedAheadAt(entry.video, recoveryTarget)", script)
         self.assertIn("bufferedAheadAt(entry.video, currentTarget)", script)
         self.assertIn('video.addEventListener("waiting"', script)
         self.assertIn("liveSyncDuration: entry.targetDelay", script)
         self.assertIn("window.setTimeout(resolve, PLAYER_DETACH_SETTLE_MS)", script)
-        self.assertIn("playerEntries.some(({ video }) => !video.paused)", script)
+        self.assertIn(
+            'function beginSplitDrag(event) {\n  if (dragging) return;\n  dragging = true;\n  els.stage.classList.add("dragging");',
+            script,
+        )
+        self.assertIn(
+            'function endSplitDrag(event) {\n  if (!dragging) return;\n  dragging = false;\n  els.stage.classList.remove("dragging");',
+            script,
+        )
+        self.assertNotIn("wasPlayingBeforeDrag", script)
+        self.assertNotIn("if (wasPlayingBeforeDrag) playBoth(true);", script)
+        self.assertNotIn("userPaused || dragging || stopping", script)
+        self.assertNotIn("function controlPlayers() {\n  if (dragging) return;", script)
         self.assertNotIn("function commonPlaybackTimeline()", script)
         self.assertNotIn("function seekBoth(", script)
         self.assertNotIn("function enterPlaybackRecovery(", script)
@@ -138,14 +153,20 @@ class WebApiTests(unittest.TestCase):
         self.assertIn('id="backlogTrend"', page)
         self.assertIn('id="sourceDownloadSpeed"', page)
         self.assertIn('id="h265BandwidthMargin"', page)
+        self.assertIn("H.265 直接播放", page)
+        self.assertNotIn("H.264 仅观看预览", page)
+        self.assertNotIn("h265_browser_preview_config", script)
+        self.assertNotIn("libx264", script)
 
     def test_live_playlist_is_not_cacheable_or_proxy_buffered(self):
         playlist_headers = _hls_response_headers(".m3u8")
         segment_headers = _hls_response_headers(".ts")
+        fmp4_headers = _hls_response_headers(".m4s")
         self.assertIn("no-store", playlist_headers["Cache-Control"])
         self.assertEqual(playlist_headers["X-Accel-Buffering"], "no")
         self.assertEqual(segment_headers["Cache-Control"], "private, max-age=120")
         self.assertEqual(segment_headers["X-Accel-Buffering"], "no")
+        self.assertEqual(fmp4_headers["Cache-Control"], "private, max-age=120")
 
     def test_hls_response_uses_an_immutable_byte_snapshot(self):
         with tempfile.TemporaryDirectory() as temp:

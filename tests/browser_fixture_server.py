@@ -11,7 +11,7 @@ from tests.test_integration import synthetic_ingest_1080p, synthetic_probe_1080p
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="V2.2.1 浏览器合成流验收服务")
+    parser = argparse.ArgumentParser(description="V2.2.2 浏览器合成流验收服务")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8131)
     args = parser.parse_args()

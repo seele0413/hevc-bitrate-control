@@ -16,7 +16,7 @@ class CliContractTests(unittest.TestCase):
             if isinstance(action, argparse._SubParsersAction)
         )
         self.assertEqual(set(subparsers.choices), {"check-env", "web"})
-        self.assertEqual(__version__, "2.2.1")
+        self.assertEqual(__version__, "2.2.2")
 
     def test_removed_commands_do_not_parse(self):
         parser = build_parser()

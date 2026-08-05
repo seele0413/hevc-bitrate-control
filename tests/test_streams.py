@@ -9,13 +9,13 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from hevc_lab.config import BROWSER_PREVIEW_CONFIG, HEVC_CONFIG
+from hevc_lab.config import DIRECT_HEVC_HLS_CONFIG, HEVC_CONFIG
 from hevc_lab.tools import Toolchain
 from hevc_lab.web.streams import (
     HEARTBEAT_TIMEOUT_SECONDS,
     HLS_TRANSPORT_MEASUREMENT_BASIS,
     HLS_PLAYLIST_SEGMENTS,
-    H265_PREVIEW_TARGET_DELAY_SECONDS,
+    H265_TARGET_DELAY_SECONDS,
     LiveStream,
     LiveStreamManager,
     PLAYBACK_POLICY,
@@ -160,7 +160,7 @@ class StreamManagerTests(unittest.TestCase):
         source_hls = next(
             command for command in commands if str(stream.outputs["source"].playlist_path) in command
         )
-        h265_preview = next(
+        h265_hls = next(
             command
             for command in commands
             if str(stream.outputs["h265_optimized"].playlist_path) in command
@@ -173,21 +173,32 @@ class StreamManagerTests(unittest.TestCase):
             source_hls[source_hls.index("-hls_list_size") + 1],
             str(HLS_PLAYLIST_SEGMENTS),
         )
-        self.assertIn("libx264", h265_preview)
+        self.assertEqual(h265_hls[h265_hls.index("-c:v") + 1], "copy")
+        self.assertEqual(h265_hls[h265_hls.index("-tag:v") + 1], "hvc1")
         self.assertEqual(
-            h265_preview[h265_preview.index("-hls_list_size") + 1],
+            h265_hls[h265_hls.index("-hls_segment_type") + 1],
+            "fmp4",
+        )
+        self.assertEqual(
+            h265_hls[h265_hls.index("-hls_fmp4_init_filename") + 1],
+            "init.mp4",
+        )
+        self.assertTrue(
+            str(h265_hls[h265_hls.index("-hls_segment_filename") + 1]).endswith(".m4s")
+        )
+        self.assertNotIn("libx264", h265_hls)
+        self.assertEqual(
+            h265_hls[h265_hls.index("-hls_list_size") + 1],
             str(HLS_PLAYLIST_SEGMENTS),
         )
-        self.assertEqual(sum(command.count("libx264") for command in commands), 1)
-        self.assertEqual(h265_preview[h265_preview.index("-preset") + 1], "ultrafast")
-        self.assertEqual(h265_preview[h265_preview.index("-crf") + 1], "26")
-        self.assertEqual(h265_preview[h265_preview.index("-maxrate") + 1], "3M")
-        self.assertEqual(h265_preview[h265_preview.index("-bufsize") + 1], "6M")
+        self.assertEqual(sum(command.count("libx264") for command in commands), 0)
         self.assertEqual(h265_encoder[h265_encoder.index("-preset") + 1], "fast")
         self.assertIn("-nostats", h265_encoder)
         self.assertEqual(h265_encoder[h265_encoder.index("-crf") + 1], "36.0")
         self.assertEqual(h265_encoder[h265_encoder.index("-profile:v") + 1], "main")
         self.assertEqual(h265_encoder[h265_encoder.index("-pix_fmt") + 1], "yuv420p")
+        format_index = h265_encoder.index("-f", h265_encoder.index("-x265-params"))
+        self.assertEqual(h265_encoder[format_index + 1], "mpegts")
         expected_params = (
             "ref=4:bframes=4:b-adapt=2:rc-lookahead=45:keyint=100:"
             "min-keyint=20:scenecut=40:cutree=1:weightp=1:aq-mode=2:"
@@ -204,8 +215,8 @@ class StreamManagerTests(unittest.TestCase):
             SOURCE_TARGET_DELAY_SECONDS,
         )
         self.assertEqual(
-            status["playback"]["h265_preview_target_delay_seconds"],
-            H265_PREVIEW_TARGET_DELAY_SECONDS,
+            status["playback"]["h265_target_delay_seconds"],
+            H265_TARGET_DELAY_SECONDS,
         )
         self.assertEqual(
             status["playback"]["recovery_low_watermark_seconds"],
@@ -218,6 +229,7 @@ class StreamManagerTests(unittest.TestCase):
         self.assertNotIn("target_delay_seconds", status["playback"])
         self.assertNotIn("recovery_buffer_seconds", status["playback"])
         self.assertEqual(status["playback"]["hls_playlist_segments"], HLS_PLAYLIST_SEGMENTS)
+        self.assertEqual(status["playback"]["hls_segment_seconds"], 10.0)
         self.assertEqual(status["playback"]["heartbeat_timeout_seconds"], HEARTBEAT_TIMEOUT_SECONDS)
         self.assertEqual(
             status["outputs"]["h265_optimized"]["probe"]["fixed_config"],
@@ -227,21 +239,23 @@ class StreamManagerTests(unittest.TestCase):
             status["hls_transport_measurement_basis"],
             HLS_TRANSPORT_MEASUREMENT_BASIS,
         )
-        self.assertEqual(BROWSER_PREVIEW_CONFIG.maxrate_mbps, 3.0)
+        self.assertEqual(DIRECT_HEVC_HLS_CONFIG.segment_type, "fmp4")
 
     def test_hls_transport_snapshot_uses_latest_closed_segments(self):
         preview = self.root / "transport"
         preview.mkdir()
         playlist = preview / "live.m3u8"
-        lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:12"]
+        lines = ["#EXTM3U", '#EXT-X-MAP:URI="init.mp4"', "#EXT-X-TARGETDURATION:12"]
         durations = [12.0, 10.0, 9.0, 8.0]
         sizes = [1_200_000, 1_000_000, None, 800_000]
         for index, (duration, size) in enumerate(zip(durations, sizes)):
-            name = f"segment_{index:05d}.ts"
+            suffix = ".ts" if index < 2 else ".m4s"
+            name = f"segment_{index:05d}{suffix}"
             lines.extend([f"#EXTINF:{duration:.3f},", name])
             if size is not None:
                 (preview / name).write_bytes(b"x" * size)
         (preview / "segment_99999.ts").write_bytes(b"x" * 5_000_000)
+        (preview / "init.mp4").write_bytes(b"x" * 9_000_000)
         playlist.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
         snapshot = _hls_transport_snapshot(playlist, window_seconds=30.0)

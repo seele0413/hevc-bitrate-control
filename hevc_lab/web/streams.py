@@ -14,17 +14,18 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
-from ..config import BROWSER_PREVIEW_CONFIG, HEVC_CONFIG
+from ..config import DIRECT_HEVC_HLS_CONFIG, HEVC_CONFIG
 from ..tools import Toolchain, discover_toolchain
+from .mpegts import MpegTsHevcByteCounter
 
 
-STREAM_PIPELINE_VERSION = "v2.2.1"
+STREAM_PIPELINE_VERSION = "v2.2.2"
 LIVE_STREAM_STATUSES = ("starting", "running", "failed", "stopped")
 LIVE_VARIANTS = ("source", "h265_optimized")
 HLS_PLAYLIST = "live.m3u8"
-HLS_SEGMENT_PATTERN = "segment_%05d.ts"
-HLS_ALLOWED_SUFFIXES = {".m3u8", ".ts"}
-HLS_SEGMENT_SECONDS = BROWSER_PREVIEW_CONFIG.hls_segment_seconds
+HLS_ALLOWED_SUFFIXES = {".m3u8", ".ts", ".m4s", ".mp4"}
+HLS_MEDIA_SUFFIXES = {".ts", ".m4s"}
+HLS_SEGMENT_SECONDS = DIRECT_HEVC_HLS_CONFIG.segment_seconds
 HLS_PLAYLIST_SEGMENTS = 60
 BITRATE_WINDOW_SECONDS = 30.0
 LIVE_BUFFER_SECONDS = 5.0
@@ -36,11 +37,11 @@ PROCESS_TERMINATE_TIMEOUT_SECONDS = 5.0
 THREAD_JOIN_TIMEOUT_SECONDS = 3.0
 PLAYBACK_POLICY = "independent_fixed_delay"
 SOURCE_TARGET_DELAY_SECONDS = 10.0
-H265_PREVIEW_TARGET_DELAY_SECONDS = 15.0
+H265_TARGET_DELAY_SECONDS = 15.0
 PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS = 1.5
 PLAYBACK_RECOVERY_HIGH_WATERMARK_SECONDS = 8.0
 HLS_TRANSPORT_MEASUREMENT_BASIS = (
-    "closed_ts_segment_bytes_latest_30s_media_duration"
+    "closed_hls_segment_bytes_latest_30s_media_duration"
 )
 
 ToolchainFactory = Callable[[], Toolchain]
@@ -174,11 +175,10 @@ def _hls_transport_snapshot(
         if not line or line.startswith("#") or pending_duration is None:
             continue
         leaf = PurePosixPath(line)
-        if (
-            len(leaf.parts) != 1
-            or leaf.name != line
-            or Path(line).suffix.lower() != ".ts"
-        ):
+        if len(leaf.parts) != 1 or leaf.name != line:
+            pending_duration = None
+            continue
+        if Path(line).suffix.lower() not in HLS_MEDIA_SUFFIXES:
             pending_duration = None
             continue
         segment_path = (playlist_path.parent / line).resolve()
@@ -280,7 +280,8 @@ class StreamOutput:
 
     @property
     def segment_pattern(self) -> Path:
-        return self.preview_dir / HLS_SEGMENT_PATTERN
+        suffix = ".ts" if self.variant == "source" else ".m4s"
+        return self.preview_dir / f"segment_%05d{suffix}"
 
 
 @dataclass
@@ -303,7 +304,7 @@ class LiveStream:
     source_hls_process: Optional[subprocess.Popen] = field(default=None, repr=False)
     decoder_process: Optional[subprocess.Popen] = field(default=None, repr=False)
     h265_encoder_process: Optional[subprocess.Popen] = field(default=None, repr=False)
-    h265_preview_process: Optional[subprocess.Popen] = field(default=None, repr=False)
+    h265_hls_process: Optional[subprocess.Popen] = field(default=None, repr=False)
     stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
     frame_queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
     frame_queue_capacity: int = MIN_FRAME_QUEUE_SIZE
@@ -426,7 +427,7 @@ class LiveStream:
             "playback": {
                 "policy": PLAYBACK_POLICY,
                 "source_target_delay_seconds": SOURCE_TARGET_DELAY_SECONDS,
-                "h265_preview_target_delay_seconds": H265_PREVIEW_TARGET_DELAY_SECONDS,
+                "h265_target_delay_seconds": H265_TARGET_DELAY_SECONDS,
                 "recovery_low_watermark_seconds": (
                     PLAYBACK_RECOVERY_LOW_WATERMARK_SECONDS
                 ),
@@ -450,12 +451,11 @@ class LiveStream:
                     "title": output.title,
                     "status": output.status,
                     "playlist_url": self.playlist_url(variant),
-                    "preview_mode": (
+                    "delivery_mode": (
                         "source_h264_stream_copy_hls"
                         if variant == "source"
-                        else "h265_native_to_h264_view_only_hls"
+                        else "h265_stream_copy_to_fmp4_hls"
                     ),
-                    "preview_only": variant == "h265_optimized",
                     "probe": dict(output.probe),
                     "metrics": output_metrics[variant],
                     "error": output.error,
@@ -541,7 +541,7 @@ class LiveStreamManager:
         outputs = {
             "source": StreamOutput(
                 variant="source",
-                title="原始 H.264 源码流（直通）",
+                title="H.264 源码直流（直通）",
                 preview_dir=stream_dir / "source",
                 probe={
                     **source_probe,
@@ -552,7 +552,7 @@ class LiveStreamManager:
             ),
             "h265_optimized": StreamOutput(
                 variant="h265_optimized",
-                title="H.265 固定参数编码",
+                title="H.265 直接播放（固定参数）",
                 preview_dir=stream_dir / "h265_optimized",
                 probe={
                     **source_probe,
@@ -659,8 +659,9 @@ class LiveStreamManager:
             stream.decoder_process = self._spawn_decoder(
                 self._decoder_command(toolchain, stream)
             )
-            stream.h265_preview_process = self._spawn_sink(
-                self._h265_preview_command(toolchain, stream)
+            stream.h265_hls_process = self._spawn_sink(
+                self._h265_hls_command(toolchain, stream),
+                cwd=stream.outputs["h265_optimized"].preview_dir,
             )
             stream.h265_encoder_process = self._spawn_encoder(
                 self._h265_encoder_command(toolchain, stream)
@@ -693,7 +694,7 @@ class LiveStreamManager:
             "source_hls",
             "decoder",
             "h265_encoder",
-            "h265_preview",
+            "h265_hls",
         ):
             self._start_thread(stream, self._consume_process_log, stream, role)
             self._start_thread(stream, self._monitor_process, stream, role)
@@ -725,13 +726,18 @@ class LiveStreamManager:
             bufsize=0,
         )
 
-    def _spawn_sink(self, command: List[Any]) -> subprocess.Popen:
+    def _spawn_sink(
+        self,
+        command: List[Any],
+        cwd: Optional[Path] = None,
+    ) -> subprocess.Popen:
         return self.process_factory(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             bufsize=0,
+            cwd=str(cwd) if cwd else None,
         )
 
     def _start_thread(self, stream: LiveStream, target: Callable, *args: Any) -> None:
@@ -805,23 +811,28 @@ class LiveStreamManager:
 
     def _relay_h265_stream(self, stream: LiveStream) -> None:
         stdout = getattr(stream.h265_encoder_process, "stdout", None)
-        preview_stdin = getattr(stream.h265_preview_process, "stdin", None)
-        if stdout is None or preview_stdin is None:
+        hls_stdin = getattr(stream.h265_hls_process, "stdin", None)
+        if stdout is None or hls_stdin is None:
             self._mark_failed(stream, "H.265 码流管道不可用")
             return
-        while not stream.stop_event.is_set():
-            chunk = stdout.read(64 * 1024)
-            if not chunk:
-                if not stream.stop_event.is_set():
-                    self._mark_failed(stream, "H.265 编码输出已中断")
-                return
-            stream.outputs["h265_optimized"].bitrate.add(len(chunk))
-            try:
-                self._write_all(preview_stdin, chunk)
-            except (BrokenPipeError, OSError, ValueError) as exc:
-                if not stream.stop_event.is_set():
-                    self._mark_failed(stream, f"H.265 等价预览输入失败：{exc}")
-                return
+        counter = MpegTsHevcByteCounter()
+        try:
+            while not stream.stop_event.is_set():
+                chunk = stdout.read(64 * 1024)
+                if not chunk:
+                    if not stream.stop_event.is_set():
+                        self._mark_failed(stream, "H.265 MPEG-TS 编码输出已中断")
+                    return
+                try:
+                    self._write_all(hls_stdin, chunk)
+                except (BrokenPipeError, OSError, ValueError) as exc:
+                    if not stream.stop_event.is_set():
+                        self._mark_failed(stream, f"H.265 HLS 重封装输入失败：{exc}")
+                    return
+                payload_bytes = counter.feed(chunk)
+                stream.outputs["h265_optimized"].bitrate.add(payload_bytes)
+        finally:
+            stream.outputs["h265_optimized"].bitrate.add(counter.finish())
 
     def _consume_process_log(self, stream: LiveStream, role: str) -> None:
         process = self._process_for_role(stream, role)
@@ -865,7 +876,7 @@ class LiveStreamManager:
             "source_hls": stream.source_hls_process,
             "decoder": stream.decoder_process,
             "h265_encoder": stream.h265_encoder_process,
-            "h265_preview": stream.h265_preview_process,
+            "h265_hls": stream.h265_hls_process,
         }[role]
 
     def _parse_h265_progress(self, output: StreamOutput, line: str) -> None:
@@ -947,7 +958,7 @@ class LiveStreamManager:
             stream.source_hls_process,
             stream.decoder_process,
             stream.h265_encoder_process,
-            stream.h265_preview_process,
+            stream.h265_hls_process,
         ]
 
     def _terminate_pipeline(self, stream: LiveStream) -> None:
@@ -1238,8 +1249,12 @@ class LiveStreamManager:
             HEVC_CONFIG.pixel_format,
             "-x265-params",
             HEVC_CONFIG.x265_params(fps),
+            "-muxdelay",
+            "0",
+            "-muxpreload",
+            "0",
             "-f",
-            "hevc",
+            "mpegts",
             "-flush_packets",
             "1",
             "-progress",
@@ -1247,44 +1262,30 @@ class LiveStreamManager:
             "pipe:1",
         ]
 
-    def _h265_preview_command(self, toolchain: Toolchain, stream: LiveStream) -> List[Any]:
+    def _h265_hls_command(self, toolchain: Toolchain, stream: LiveStream) -> List[Any]:
         output = stream.outputs["h265_optimized"]
-        fps = float(stream.source_probe["fps"])
-        gop = max(1, round(fps * BROWSER_PREVIEW_CONFIG.gop_seconds))
         return [
             toolchain.ffmpeg,
             "-hide_banner",
-            "-fflags",
-            "+genpts",
-            "-r",
-            f"{fps:.6f}",
+            "-nostdin",
+            "-copyts",
             "-f",
-            "hevc",
+            "mpegts",
             "-i",
             "pipe:0",
+            "-map",
+            "0:v:0",
             "-an",
             "-c:v",
-            BROWSER_PREVIEW_CONFIG.codec,
-            "-preset",
-            BROWSER_PREVIEW_CONFIG.preset,
-            "-crf",
-            str(BROWSER_PREVIEW_CONFIG.crf),
-            "-maxrate",
-            BROWSER_PREVIEW_CONFIG.ffmpeg_maxrate(),
-            "-bufsize",
-            BROWSER_PREVIEW_CONFIG.ffmpeg_bufsize(),
-            "-tune",
-            "zerolatency",
-            "-pix_fmt",
-            "yuv420p",
-            "-g",
-            str(gop),
-            "-keyint_min",
-            str(gop),
-            "-sc_threshold",
-            "0",
+            "copy",
+            "-tag:v",
+            DIRECT_HEVC_HLS_CONFIG.codec_tag,
             "-f",
             "hls",
+            "-hls_segment_type",
+            DIRECT_HEVC_HLS_CONFIG.segment_type,
+            "-hls_fmp4_init_filename",
+            DIRECT_HEVC_HLS_CONFIG.init_filename,
             "-hls_time",
             str(HLS_SEGMENT_SECONDS),
             "-hls_list_size",
